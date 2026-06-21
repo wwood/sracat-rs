@@ -16,6 +16,7 @@ extern "C" {
     fn sracat_open(
         path: *const c_char,
         with_quality: c_int,
+        allow_aligned: c_int,
         out: *mut *mut SracatRun,
         errbuf: *mut c_char,
         errlen: usize,
@@ -59,7 +60,7 @@ fn errstr(buf: &[u8]) -> String {
 }
 
 impl Run {
-    pub fn open(path: &str, with_quality: bool) -> Result<Run> {
+    pub fn open(path: &str, with_quality: bool, allow_aligned: bool) -> Result<Run> {
         let c = CString::new(path)?;
         let mut out: *mut SracatRun = ptr::null_mut();
         let mut err = [0u8; 512];
@@ -67,6 +68,7 @@ impl Run {
             sracat_open(
                 c.as_ptr(),
                 c_int::from(with_quality),
+                c_int::from(allow_aligned),
                 &mut out,
                 err.as_mut_ptr() as *mut c_char,
                 err.len(),

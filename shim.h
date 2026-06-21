@@ -19,11 +19,14 @@ typedef struct SracatRun SracatRun;
 /* Open an SRA run for reading.
  * If with_quality != 0, the QUALITY column is also opened so sracat_read_spot
  * returns per-base phred scores.
- * Returns 0 on success (and sets *out), nonzero on failure (message in errbuf).
- * Fails deliberately on aligned runs (a PRIMARY_ALIGNMENT table is present),
- * where READ is reconstructed from alignments rather than stored directly. */
-int sracat_open(const char *path, int with_quality, SracatRun **out,
-                char *errbuf, size_t errlen);
+ * If allow_aligned == 0, aligned runs (a PRIMARY_ALIGNMENT table is present) are
+ * refused, since READ is reconstructed from alignments rather than stored. If
+ * allow_aligned != 0, such runs are opened anyway and the computed READ column
+ * reconstructs each spot (correct and in spot order, but with random access into
+ * the alignment table).
+ * Returns 0 on success (and sets *out), nonzero on failure (message in errbuf). */
+int sracat_open(const char *path, int with_quality, int allow_aligned,
+                SracatRun **out, char *errbuf, size_t errlen);
 
 /* First row id and number of rows (spots) in the SEQUENCE table. */
 int64_t sracat_first_row(const SracatRun *run);

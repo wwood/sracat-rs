@@ -4,7 +4,7 @@
 //! ncbi-vdb cursor API (through a small C shim). Output is therefore repeatable
 //! across runs. Paired spots are emitted interleaved; single/orphan spots are
 //! routed to a separate stream. Aligned runs (where READ is reconstructed from
-//! alignments) are refused.
+//! alignments) are refused unless --allow-aligned is given.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -41,6 +41,12 @@ struct Cli {
     #[arg(long)]
     include_technical: bool,
 
+    /// Extract aligned (cSRA) runs instead of refusing them. READ is
+    /// reconstructed from the alignment table (correct, spot-ordered, no temp
+    /// files), at the cost of random access into that table.
+    #[arg(long)]
+    allow_aligned: bool,
+
     /// Number of extraction threads. >1 decodes contiguous row ranges in
     /// parallel and writes them in order through a single writer (still
     /// repeatable; no temp files).
@@ -56,6 +62,7 @@ struct Cli {
 struct Opts {
     qual: bool,
     include_technical: bool,
+    allow_aligned: bool,
     bench_read_only: bool,
 }
 
@@ -133,6 +140,7 @@ fn main() -> Result<()> {
     let opts = Opts {
         qual: cli.qual,
         include_technical: cli.include_technical,
+        allow_aligned: cli.allow_aligned,
         bench_read_only: cli.bench_read_only,
     };
     let ext = if cli.qual { "fastq" } else { "fasta" };
@@ -160,7 +168,7 @@ fn main() -> Result<()> {
     for input in &cli.inputs {
         let name = derive_name(input);
         let c = if threads == 1 {
-            let run = Run::open(input, opts.qual)?;
+            let run = Run::open(input, opts.qual, opts.allow_aligned)?;
             let (lo, hi) = (run.first_row(), run.first_row() + run.row_count() as i64);
             extract_range(&run, lo, hi, &name, &mut paired, &mut single, opts)?
         } else {
@@ -253,7 +261,7 @@ fn extract_parallel(
 
     // Validate (incl. aligned check) and learn the row range up front.
     let (first, count) = {
-        let run = Run::open(input, opts.qual)?;
+        let run = Run::open(input, opts.qual, opts.allow_aligned)?;
         (run.first_row(), run.row_count())
     };
     let hi = first + count as i64;
@@ -272,7 +280,7 @@ fn extract_parallel(
             let tx = tx.clone();
             let (next_chunk, next_write) = (&next_chunk, &next_write);
             scope.spawn(move || {
-                let run = match Run::open(input, opts.qual) {
+                let run = match Run::open(input, opts.qual, opts.allow_aligned) {
                     Ok(r) => r,
                     Err(e) => {
                         let _ = tx.send(Err(e));

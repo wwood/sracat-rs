@@ -49,6 +49,29 @@ fn aligned_run_croaks() {
         .unwrap();
 }
 
+/// With --allow-aligned, the same cSRA run is extracted (READ reconstructed from
+/// the alignment table) rather than refused. Uses the fetched fixture; skips if
+/// absent.
+#[test]
+fn allow_aligned_extracts() {
+    let f = format!(
+        "{}/tests/data/ERR1540848/ERR1540848.sra",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&f).exists() {
+        eprintln!(
+            "skipping allow_aligned_extracts: {f} not present (run: pixi run fetch-testdata)"
+        );
+        return;
+    }
+    Assert::main_binary()
+        .with_args(&["--allow-aligned", "--single-out", "/dev/null", f.as_str()])
+        .succeeds()
+        .stdout()
+        .contains(">ERR1540848.")
+        .unwrap();
+}
+
 #[test]
 fn single_end_without_sink_croaks() {
     // The fixture is single-end, so with pairs going to stdout and no single

@@ -31,8 +31,8 @@ static void seterr(char *errbuf, size_t errlen, const char *msg) {
     }
 }
 
-int sracat_open(const char *path, int with_quality, SracatRun **out,
-                char *errbuf, size_t errlen) {
+int sracat_open(const char *path, int with_quality, int allow_aligned,
+                SracatRun **out, char *errbuf, size_t errlen) {
     *out = NULL;
     SracatRun *r = calloc(1, sizeof(*r));
     if (r == NULL) {
@@ -48,10 +48,11 @@ int sracat_open(const char *path, int with_quality, SracatRun **out,
 
     /* Most SRA runs are databases; legacy runs are flat tables. */
     if (VDBManagerOpenDBRead(r->mgr, &r->db, NULL, "%s", path) == 0) {
-        /* Refuse aligned runs: a PRIMARY_ALIGNMENT table means READ in the
-         * SEQUENCE table is reconstructed from alignments, not stored. */
+        /* Refuse aligned runs unless explicitly allowed: a PRIMARY_ALIGNMENT
+         * table means READ in the SEQUENCE table is reconstructed from
+         * alignments, not stored. */
         KNamelist *tables = NULL;
-        if (VDatabaseListTbl(r->db, &tables) == 0 && tables != NULL) {
+        if (!allow_aligned && VDatabaseListTbl(r->db, &tables) == 0 && tables != NULL) {
             uint32_t n = 0;
             KNamelistCount(tables, &n);
             for (uint32_t i = 0; i < n; i++) {

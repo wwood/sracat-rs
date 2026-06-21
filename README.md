@@ -24,17 +24,18 @@ Benefits:
   separate stream.
 - **Refuses aligned runs.** If the run is aligned (a `PRIMARY_ALIGNMENT` table
   is present), `READ` in `SEQUENCE` is reconstructed from alignments rather than
-  stored; `sracat-rs` errors out instead of silently doing expensive/incorrect
-  work.
+  stored; `sracat-rs` errors out by default instead of silently doing expensive
+  work. Pass `--allow-aligned` to extract them anyway (see below).
 
 ## Build
 
-Everything (Rust toolchain, C compiler, ncbi-vdb headers + shared library) is
-provided by the pixi environment:
+Everything (Rust toolchain, C compiler, ncbi-vdb headers + shared library,
+plus snakemake + sra-tools for test data) is provided by the pixi environment:
 
 ```sh
-pixi run build      # cargo build --release
-pixi run test       # cargo test
+pixi run build           # cargo build --release
+pixi run fetch-testdata  # snakemake: prefetch the cSRA test fixture
+pixi run test            # cargo test (depends on fetch-testdata)
 ```
 
 The release binary lands at `target/release/sracat-rs`. The path to
@@ -111,3 +112,26 @@ faster than `fasterq-dump -e8` and ~12× faster than the single-threaded C++
 fasterq-dump — while being deterministic and running against current ncbi-vdb
 (3.x). (Benchmark on dedicated cores: on a contended shared node, scaling is
 masked by CPU competition.)
+
+## Aligned (cSRA) runs
+
+By default aligned runs are refused. With `--allow-aligned`, `sracat-rs` extracts
+them by reading the computed `READ` column, which ncbi-vdb reconstructs per spot
+from the alignment table — correct, spot-ordered, **interleaved pairs, no temp
+files** (unlike `fasterq-dump`'s default dump-and-sort in the temp dir). Output
+is verified byte-identical (sorted) to `fasterq-dump --fasta` on the same run.
+
+cSRA ERR1540848 (9 MB, 190k spots), all biological reads:
+
+| tool                                  | time   |
+| ------------------------------------- | ------ |
+| **sracat-rs --allow-aligned -t1**     | 2.39 s |
+| sracat-rs --allow-aligned -t8         | 2.45 s |
+| fasterq-dump `--fasta` (sorted) -e8   | 3.94 s |
+| fasterq-dump `--fasta-unsorted` -e8   | 3.94 s |
+
+~1.6× faster than fasterq-dump with no temp dir. Caveat: reconstruction does
+random access into the alignment table and **does not scale with `-t`** (it
+appears serialized inside ncbi-vdb), unlike unaligned runs. For large aligned
+runs a bounded mate-pairing window over the alignment table (streaming, no sort)
+would be the next step.
