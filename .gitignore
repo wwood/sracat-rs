@@ -1,0 +1,16 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# rust build artifacts
+/target
+
+# stray extraction output
+*.fasta
+
+# test data pulled on demand by Snakemake (pixi run fetch-testdata)
+/tests/data/ERR1540848/
+/logs/
+/benchmarks/
+/.snakemake/
+bench_big.txt

@@ -1,0 +1,24 @@
+[package]
+name = "sracat-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Fast, deterministic extraction of reads from SRA files via the ncbi-vdb cursor API"
+license = "MIT"
+
+[[bin]]
+name = "sracat-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+assert_cli = "0.6"
+
+[profile.release]
+lto = true
+codegen-units = 1
