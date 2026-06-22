@@ -1,0 +1,85 @@
+name: release
+
+# Build a self-contained sracat-rs binary (static ncbi-vdb, so no libncbi-vdb.so
+# / conda-path runtime dependency) and attach it to a GitHub Release when a v*
+# tag is pushed. This is the hand-rolled release route; the alternative is
+# cargo-dist (see [workspace.metadata.dist] in Cargo.toml) — use one or the
+# other, not both.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04 # old-ish glibc for broad compatibility
+            target: x86_64-unknown-linux-gnu
+          # ncbi-vdb (bioconda) is also on macOS, where build.rs links libc++.
+          # Uncomment to add (not verified here):
+          # - os: macos-13
+          #   target: x86_64-apple-darwin
+          # - os: macos-14
+          #   target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          manifest-path: pixi.toml
+
+      - name: Install ncbi-vdb + toolchain into the pixi env
+        run: pixi install
+
+      - name: Build self-contained binary (static ncbi-vdb)
+        run: pixi run build-static
+
+      - name: Strip the dead conda rpath and show runtime deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y patchelf
+          patchelf --remove-rpath target/release/sracat-rs
+          echo "== runtime deps (no libncbi-vdb.so expected) =="
+          readelf -d target/release/sracat-rs | grep NEEDED
+
+      - name: Package tarball
+        id: pkg
+        shell: bash
+        run: |
+          name="sracat-rs-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "stage/$name"
+          cp target/release/sracat-rs "stage/$name/"
+          cp README.md "stage/$name/" 2>/dev/null || true
+          [ -f LICENSE ] && cp LICENSE "stage/$name/" || true
+          tar -C stage -czf "$name.tar.gz" "$name"
+          echo "asset=$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.pkg.outputs.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
+          generate_release_notes: true

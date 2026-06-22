@@ -1,0 +1,17 @@
+# Custom steps cargo-dist injects before each build job (referenced from
+# Cargo.toml [workspace.metadata.dist] `github-build-setup`).
+#
+# cargo-dist runs `cargo build` directly, not inside `pixi run`, so these steps
+# provision ncbi-vdb + the toolchain via pixi and then export CONDA_PREFIX (so
+# build.rs finds the headers/static lib) and SRACAT_VDB_LINK=static (so the
+# released binary has no libncbi-vdb.so / conda-path runtime dependency).
+- uses: prefix-dev/setup-pixi@v0.8.1
+  with:
+    manifest-path: pixi.toml
+- name: Install ncbi-vdb + toolchain into the pixi env
+  run: pixi install
+- name: Point the build at the pixi env and static-link ncbi-vdb
+  shell: bash
+  run: |
+    echo "CONDA_PREFIX=$PWD/.pixi/envs/default" >> "$GITHUB_ENV"
+    echo "SRACAT_VDB_LINK=static"               >> "$GITHUB_ENV"

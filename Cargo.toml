@@ -22,3 +22,19 @@ assert_cli = "0.6"
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Config for cargo-dist (https://opensource.axo.dev/cargo-dist/). This is one of
+# two release routes (the other is the hand-rolled .github/workflows/release.yml,
+# which works today). To use cargo-dist instead, install `dist`, run `dist init`,
+# and let it generate its own .github/workflows/release.yml (replacing the
+# hand-rolled one). `build-setup.yml` provisions ncbi-vdb via pixi so the build
+# can static-link it. ncbi-vdb (bioconda) is Linux + macOS only — no Windows.
+[workspace]
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.0"
+ci = "github"
+installers = ["shell"]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
+github-build-setup = "build-setup.yml"
+install-updater = false

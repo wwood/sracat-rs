@@ -7,6 +7,9 @@ version = "0.1.0"
 
 [tasks]
 build = "cargo build --release"
+# Self-contained release binary: static-link ncbi-vdb so there is no
+# libncbi-vdb.so / conda-path runtime dependency (for cargo-dist etc.).
+build-static = { cmd = "cargo build --release", env = { SRACAT_VDB_LINK = "static" } }
 sracat-rs = "cargo run --release --"
 
 [dependencies]
