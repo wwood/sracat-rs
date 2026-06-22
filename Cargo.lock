@@ -378,6 +378,7 @@ dependencies = [
  "assert_cli",
  "cc",
  "clap",
+ "libc",
 ]
 
 [[package]]

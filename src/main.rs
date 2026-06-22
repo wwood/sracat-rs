@@ -6,8 +6,10 @@
 //! routed to a separate stream. Aligned runs (where READ is reconstructed from
 //! alignments) are refused unless --allow-aligned is given.
 
-use std::fs::File;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -122,6 +124,46 @@ impl PairedSink<'_> {
     }
 }
 
+#[cfg(unix)]
+fn open_split_output(path: &str) -> io::Result<Box<dyn Write>> {
+    use std::os::unix::fs::FileTypeExt;
+
+    match fs::metadata(path) {
+        Ok(meta) if meta.file_type().is_fifo() => {
+            // FIFO consumers may open/read split mates sequentially. For example,
+            // needletail fills a 64 KiB buffer from R1 before `weebill` advances
+            // to R2, so a default 64 KiB R2 pipe can deadlock even when sracat
+            // alternates R1/R2 writes. O_RDWR lets both FIFO opens complete; a
+            // larger pipe gives the delayed mate enough room until its reader
+            // catches up.
+            let f = OpenOptions::new().read(true).write(true).open(path)?;
+            enlarge_pipe_buffer(&f);
+            Ok(Box::new(f) as Box<dyn Write>)
+        }
+        _ => File::create(path)
+            .map(|f| Box::new(BufWriter::with_capacity(1 << 20, f)) as Box<dyn Write>),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn enlarge_pipe_buffer(f: &File) {
+    const FIFO_PIPE_BYTES: libc::c_int = 1 << 20;
+    unsafe {
+        // Best effort: unprivileged callers can usually raise small pipes up to
+        // /proc/sys/fs/pipe-max-size. If the kernel refuses, ordinary FIFO
+        // semantics still apply and the write will surface any real I/O error.
+        libc::fcntl(f.as_raw_fd(), libc::F_SETPIPE_SZ, FIFO_PIPE_BYTES);
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn enlarge_pipe_buffer(_: &File) {}
+
+#[cfg(not(unix))]
+fn open_split_output(path: &str) -> io::Result<Box<dyn Write>> {
+    File::create(path).map(|f| Box::new(BufWriter::with_capacity(1 << 20, f)) as Box<dyn Write>)
+}
+
 /// Destination for single/orphan reads, opened lazily so no empty file is
 /// created for a cleanly paired run, and so the "no destination" case can fail
 /// only if a single read actually appears.
@@ -192,15 +234,12 @@ fn main() -> Result<()> {
     // (<prefix>.paired or stdout). The owned writers live here; `paired` borrows
     // them and is dropped before they are flushed below.
     let mut inter: Option<BufWriter<Box<dyn Write>>> = None;
-    let mut split: Option<(BufWriter<File>, BufWriter<File>)> = None;
+    let mut split: Option<(Box<dyn Write>, Box<dyn Write>)> = None;
     match (&cli.read1, &cli.read2) {
         (Some(r1), Some(r2)) => {
-            let f1 = File::create(r1).with_context(|| format!("creating {r1}"))?;
-            let f2 = File::create(r2).with_context(|| format!("creating {r2}"))?;
-            split = Some((
-                BufWriter::with_capacity(1 << 20, f1),
-                BufWriter::with_capacity(1 << 20, f2),
-            ));
+            let f1 = open_split_output(r1).with_context(|| format!("creating {r1}"))?;
+            let f2 = open_split_output(r2).with_context(|| format!("creating {r2}"))?;
+            split = Some((f1, f2));
         }
         // clap guarantees -1 and -2 come together, so the remaining cases have
         // neither set: fall back to an interleaved stream.

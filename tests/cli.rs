@@ -268,6 +268,136 @@ fn split_parallel_does_not_block() {
     }
 }
 
+/// Split output to FIFOs must not block while opening the first mate FIFO before
+/// the second. `--bench-read-only` avoids needing external readers; the test is
+/// specifically about FIFO open behavior.
+#[cfg(unix)]
+#[test]
+fn split_fifos_open_without_readers() {
+    let dir = std::env::temp_dir();
+    let r1 = format!("{}/sracat_rs_fifo_r1", dir.display());
+    let r2 = format!("{}/sracat_rs_fifo_r2", dir.display());
+    for f in [&r1, &r2] {
+        let _ = std::fs::remove_file(f);
+        let status = Command::new("mkfifo").arg(f).status().expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed for {f}");
+    }
+
+    let ok = run_within(
+        30,
+        &[
+            "-1",
+            &r1,
+            "-2",
+            &r2,
+            "--bench-read-only",
+            fixture().as_str(),
+        ],
+    );
+    assert!(ok, "split FIFO outputs blocked while opening");
+
+    for f in [&r1, &r2] {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+/// A real split-FIFO consumer can prefetch a large chunk from R1 before opening
+/// R2. This mirrors `weebill`/needletail's initial R1 buffer fill and verifies
+/// the CLI can keep writing until the delayed R2 reader catches up.
+#[cfg(unix)]
+#[test]
+fn split_fifos_tolerate_delayed_r2_reader() {
+    use std::io::Read;
+
+    let f = format!(
+        "{}/tests/data/DRR033172/DRR033172.sra",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&f).exists() {
+        eprintln!(
+            "skipping split_fifos_tolerate_delayed_r2_reader: {f} not present (run: pixi run fetch-testdata)"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir();
+    let tag = format!("{}_{}", std::process::id(), unique_nanos());
+    let r1 = format!("{}/sracat_rs_delay_r1_{tag}", dir.display());
+    let r2 = format!("{}/sracat_rs_delay_r2_{tag}", dir.display());
+    for fifo in [&r1, &r2] {
+        let status = Command::new("mkfifo")
+            .arg(fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed for {fifo}");
+    }
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
+        .args(["-1", &r1, "-2", &r2, f.as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sracat-rs");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let r1_reader = {
+        let r1 = r1.clone();
+        std::thread::spawn(move || {
+            let mut file = std::fs::File::open(&r1).expect("open r1 fifo");
+            let mut prefetch = vec![0u8; 128 * 1024];
+            file.read_exact(&mut prefetch).expect("prefetch r1");
+            tx.send(()).expect("signal r1 prefetch");
+            let mut rest = Vec::new();
+            file.read_to_end(&mut rest).expect("drain r1");
+            prefetch.len() + rest.len()
+        })
+    };
+
+    rx.recv_timeout(Duration::from_secs(15))
+        .expect("r1 prefetch should complete before r2 opens");
+
+    let r2_reader = {
+        let r2 = r2.clone();
+        std::thread::spawn(move || {
+            let mut file = std::fs::File::open(&r2).expect("open r2 fifo");
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).expect("drain r2");
+            data.len()
+        })
+    };
+
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("sracat-rs blocked with delayed r2 FIFO reader");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "sracat-rs did not exit successfully");
+
+    let r1_bytes = r1_reader.join().expect("join r1 reader");
+    let r2_bytes = r2_reader.join().expect("join r2 reader");
+    assert!(r1_bytes > 128 * 1024, "expected substantial r1 output");
+    assert!(r2_bytes > 128 * 1024, "expected substantial r2 output");
+
+    for fifo in [&r1, &r2] {
+        let _ = std::fs::remove_file(fifo);
+    }
+}
+
+#[cfg(unix)]
+fn unique_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+}
+
 /// `-1` requires `-2` (and vice versa): clap rejects one without the other.
 #[test]
 fn read1_requires_read2() {
