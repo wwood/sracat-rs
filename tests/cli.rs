@@ -1,6 +1,9 @@
 //! Command-line interface tests, exercising the built binary against a small
 //! single-end fixture in tests/data.
 
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
 use assert_cli::Assert;
 
 fn fixture() -> String {
@@ -8,6 +11,30 @@ fn fixture() -> String {
         "{}/tests/data/ERR015558.lite.sra",
         env!("CARGO_MANIFEST_DIR")
     )
+}
+
+/// Run the built binary with a wall-clock limit, so a hang (e.g. a writer/worker
+/// deadlock) becomes a test failure instead of blocking the whole suite. Returns
+/// whether the process exited successfully.
+fn run_within(secs: u64, args: &[&str]) -> bool {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sracat-rs");
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return status.success();
+        }
+        if start.elapsed() > Duration::from_secs(secs) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("sracat-rs blocked: no exit within {secs}s (args: {args:?})");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -135,6 +162,44 @@ fn split_output_to_read1_read2() {
     assert!(!b2.contains("/1"), "read2 must not contain forward reads");
     let _ = std::fs::remove_file(&r1);
     let _ = std::fs::remove_file(&r2);
+}
+
+/// `-1`/`-2` with multiple threads must run the parallel writer to completion,
+/// not deadlock. The single-end fixture exercises the parallel decode path; its
+/// reads are orphans, so they go to --single-out. Timeout-guarded so a hang
+/// fails the test rather than blocking CI forever.
+#[test]
+fn split_parallel_does_not_block() {
+    let dir = std::env::temp_dir();
+    let r1 = format!("{}/sracat_rs_par_r1.fasta", dir.display());
+    let r2 = format!("{}/sracat_rs_par_r2.fasta", dir.display());
+    let s = format!("{}/sracat_rs_par_s.fasta", dir.display());
+    for f in [&r1, &r2, &s] {
+        let _ = std::fs::remove_file(f);
+    }
+    let ok = run_within(
+        30,
+        &[
+            "-t",
+            "4",
+            "-1",
+            &r1,
+            "-2",
+            &r2,
+            "--single-out",
+            &s,
+            fixture().as_str(),
+        ],
+    );
+    assert!(ok, "parallel -1/-2 run did not exit successfully");
+    let singles = std::fs::read_to_string(&s).expect("singles written");
+    assert!(
+        singles.contains("ERR015558"),
+        "expected orphan reads routed to --single-out"
+    );
+    for f in [&r1, &r2, &s] {
+        let _ = std::fs::remove_file(f);
+    }
 }
 
 /// `-1` requires `-2` (and vice versa): clap rejects one without the other.
