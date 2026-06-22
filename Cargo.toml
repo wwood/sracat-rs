@@ -1,6 +1,6 @@
 [package]
 name = "sracat-rs"
-version = "0.0.2"
+version = "0.0.1"
 edition = "2021"
 description = "Fast, deterministic extraction of reads from SRA files via the ncbi-vdb cursor API"
 license = "MIT"
