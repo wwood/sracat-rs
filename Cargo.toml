@@ -46,7 +46,7 @@ installers = ["shell"]
 #     and verify the libc++ static link on a macOS runner
 # Add them back once the matching pixi env / runner is in place.
 targets = ["x86_64-unknown-linux-gnu"]
-github-build-setup = "build-setup.yml"
+github-build-setup = "build-setup/build-setup.yml"
 # Whether to install an updater program
 install-updater = false
 # Path that installers should place binaries in
