@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Fast, deterministic extraction of reads from SRA files via the ncbi-vdb cursor API"
 license = "MIT"
+repository = "https://github.com/wwood/sracat-rs"
 
 [[bin]]
 name = "sracat-rs"
@@ -23,18 +24,30 @@ assert_cli = "0.6"
 lto = true
 codegen-units = 1
 
-# Config for cargo-dist (https://opensource.axo.dev/cargo-dist/). This is one of
-# two release routes (the other is the hand-rolled .github/workflows/release.yml,
-# which works today). To use cargo-dist instead, install `dist`, run `dist init`,
-# and let it generate its own .github/workflows/release.yml (replacing the
-# hand-rolled one). `build-setup.yml` provisions ncbi-vdb via pixi so the build
-# can static-link it. ncbi-vdb (bioconda) is Linux + macOS only — no Windows.
-[workspace]
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
+# Config for 'dist'
 [workspace.metadata.dist]
-cargo-dist-version = "0.28.0"
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
 ci = "github"
+# The installers to generate for each app
 installers = ["shell"]
-targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
+# Target platforms to build apps for (Rust target-triple syntax).
+# Limited to x86_64 linux/glibc: that is what the conda ncbi-vdb we static-link
+# is built for. The others dist defaulted to cannot work as-is —
+#   - x86_64-unknown-linux-musl: conda ncbi-vdb is glibc, not musl
+#   - aarch64-unknown-linux-gnu: needs a linux-aarch64 ncbi-vdb env (cross build)
+#   - *-apple-darwin: add "osx-64"/"osx-arm64" to pixi.toml `platforms` first,
+#     and verify the libc++ static link on a macOS runner
+# Add them back once the matching pixi env / runner is in place.
+targets = ["x86_64-unknown-linux-gnu"]
 github-build-setup = "build-setup.yml"
+# Whether to install an updater program
 install-updater = false
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"

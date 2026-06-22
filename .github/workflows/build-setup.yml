@@ -5,7 +5,8 @@
 # provision ncbi-vdb + the toolchain via pixi and then export CONDA_PREFIX (so
 # build.rs finds the headers/static lib) and SRACAT_VDB_LINK=static (so the
 # released binary has no libncbi-vdb.so / conda-path runtime dependency).
-- uses: prefix-dev/setup-pixi@v0.8.1
+- name: Set up pixi
+  uses: prefix-dev/setup-pixi@v0.8.1
   with:
     manifest-path: pixi.toml
 - name: Install ncbi-vdb + toolchain into the pixi env
