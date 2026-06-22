@@ -1,12 +1,35 @@
 # sracat-rs
 
-A fast, deterministic reimplementation of [`sracat`](../sracat) in Rust that
-extracts reads from SRA files as FASTA/FASTQ. It reads SRA directly through the
-**ncbi-vdb cursor C API** (via a small C shim) rather than the legacy NGS C++
-engine, emitting reads in storage order so the output is byte-identical across
-runs. The natural point of comparison is `fasterq-dump` (the sra-tools
-extractor); `sracat-rs` is faster while staying order-stable and writing no temp
-files.
+A fast, deterministic reimplementation of `fasterq-dump` (the sra-tools
+extractor) with a focus on flexibly streaming outputs. It reads SRA directly through the
+**ncbi-vdb cursor C API** (via a small C shim), emitting reads in storage order so the output is byte-identical across
+runs. 
+
+## Why
+
+The original `sracat` uses the NGS C++ API (`ncbi::NGS::openReadCollection`),
+which is only available in ncbi-vdb 2.x. `sracat-rs` instead binds the
+lower-level VDB cursor API present in current ncbi-vdb (3.4.1), reading the
+`SEQUENCE` table's `READ` / `READ_LEN` / `READ_TYPE` columns in storage order.
+
+Benefits:
+
+- **Repeatable order.** Reads are emitted in `SEQUENCE`-table row order,
+  single-threaded — byte-identical across runs (unlike `fasterq-dump
+  --fasta-unsorted` with multiple threads).
+- **Faster.** (with many threads) Quicker than both `fasterq-dump` and the NGS-based C++ `sracat` on
+  the same data (no per-fragment allocations, no NGS virtual-dispatch layer;
+  reads column blobs directly).
+- **Paired / single aware.** Spots with two biological reads are emitted
+  interleaved (`/1`, `/2`); spots with a single biological read are routed to a
+  separate stream.
+- **Flexible streaming output.** Pick the shape that fits the next tool, all
+  without temp files: interleaved pairs to **stdout** (pipe straight into a
+  mapper/assembler), split mates into separate **`-1`/`-2`** files, or prefixed
+  files — while single/orphan reads are always routed to their own destination
+  (and never silently dropped).
+- **Aligned-aware.** Aligned (cSRA) runs are extracted by default by reading the
+  computed `READ` column; pass `--croak-on-aligned` to refuse them instead.
 
 ## Benchmarks
 
@@ -71,32 +94,6 @@ parallelise, so `sracat-rs` **hard-caps aligned runs to a single thread** (`-t16
 above is therefore the same single-threaded run; see
 [Aligned (cSRA) runs](#aligned-csra-runs)). Benchmark on dedicated cores — on a
 contended shared node CPU competition masks the thread scaling.
-
-## Why
-
-The original `sracat` uses the NGS C++ API (`ncbi::NGS::openReadCollection`),
-which is only available in ncbi-vdb 2.x. `sracat-rs` instead binds the
-lower-level VDB cursor API present in current ncbi-vdb (3.4.1), reading the
-`SEQUENCE` table's `READ` / `READ_LEN` / `READ_TYPE` columns in storage order.
-
-Benefits:
-
-- **Repeatable order.** Reads are emitted in `SEQUENCE`-table row order,
-  single-threaded — byte-identical across runs (unlike `fasterq-dump
-  --fasta-unsorted` with multiple threads).
-- **Faster.** (with many threads) Quicker than both `fasterq-dump` and the NGS-based C++ `sracat` on
-  the same data (no per-fragment allocations, no NGS virtual-dispatch layer;
-  reads column blobs directly).
-- **Paired / single aware.** Spots with two biological reads are emitted
-  interleaved (`/1`, `/2`); spots with a single biological read are routed to a
-  separate stream.
-- **Flexible streaming output.** Pick the shape that fits the next tool, all
-  without temp files: interleaved pairs to **stdout** (pipe straight into a
-  mapper/assembler), split mates into separate **`-1`/`-2`** files, or prefixed
-  files — while single/orphan reads are always routed to their own destination
-  (and never silently dropped).
-- **Aligned-aware.** Aligned (cSRA) runs are extracted by default by reading the
-  computed `READ` column; pass `--croak-on-aligned` to refuse them instead.
 
 ## Algorithmic approach
 
