@@ -50,11 +50,12 @@ dedicated 16-core compute node:
 | --- | --: | --: | --: | --: | --: |
 | SRR24704796 (2.7 GB, unaligned) | 45.8 ± 1.5 | 28.3 ± 1.5 | 9.6 ± 1.0 | 28.3 ± 0.4 | **8.1 ± 0.8** |
 | ERR12726217 (0.6 GB, unaligned) | 15.8 ± 0.8 | 9.9 ± 0.4 | 4.4 ± 0.2 | 10.3 ± 0.4 | **3.4 ± 0.3** |
-| ERR1540848 (9 MB, cSRA) | 5.1 ± 0.0 | 9.3 ± 2.7 | 11.7 ± 3.4 | 6.7 ± 0.8 | **7.3 ± 0.1** |
+| ERR1540848 (9 MB, cSRA) | **5.1 ± 0.0** | 9.3 ± 2.7 | 11.7 ± 3.4 | 6.7 ± 0.8 | 7.3 ± 0.1 |
 
-(fasterq-dump columns are `--fasta-unsorted` for the unaligned runs and
-`--fasta` sorted for the cSRA. For the cSRA, sracat-rs caps itself to one thread,
-so its `t16` figure is the single-threaded run — see below.)
+(Bold marks the fastest tool per row. fasterq-dump columns are
+`--fasta-unsorted` for the unaligned runs and `--fasta` sorted for the cSRA. For
+the cSRA, sracat-rs caps itself to one thread, so its `t16` figure is the
+single-threaded run — see below.)
 
 `fasterq-dump --fasta-unsorted` is multi-threaded but **not order-stable**;
 `fasterq-dump --fasta` (sorted) is deterministic but builds temp files.
