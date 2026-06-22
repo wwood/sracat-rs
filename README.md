@@ -1,8 +1,75 @@
 # sracat-rs
 
-A fast, deterministic reimplementation of [`sracat`](../) in Rust, reading SRA
-files directly through the **ncbi-vdb cursor C API** (via a small C shim) rather
-than the legacy NGS C++ engine.
+A fast, deterministic reimplementation of [`sracat`](../sracat) in Rust that
+extracts reads from SRA files as FASTA/FASTQ. It reads SRA directly through the
+**ncbi-vdb cursor C API** (via a small C shim) rather than the legacy NGS C++
+engine, emitting reads in storage order so the output is byte-identical across
+runs. The natural point of comparison is `fasterq-dump` (the sra-tools
+extractor); `sracat-rs` is faster while staying order-stable and writing no temp
+files.
+
+## Benchmarks
+
+`benchmarking/` holds a self-contained comparison of `sracat-rs` against
+**`fasterq-dump`** (the primary comparison) and the original C++ `sracat` (for
+reference), on three runs: two unaligned (SRR24704796, 2.7 GB; ERR12726217,
+0.6 GB) and one aligned cSRA (ERR1540848, 9 MB). The inputs are fetched with
+[`kingfisher`](https://github.com/wwood/kingfisher-download) via `Snakefile`,
+and the benchmark `pixi.toml` builds the C++ `sracat` against conda-provided
+ncbi-vdb 2.11 + NGS libraries so the original tool can be measured reproducibly:
+
+```sh
+cd benchmarking
+pixi run -e download download   # fetch the SRA inputs with kingfisher
+pixi run build-cpp              # compile ../../sracat/sracat.cpp against conda libs
+# run on a dedicated allocation (a shared login node hides thread scaling). Each
+# input is staged to node-local $TMP first so shared-FS IO isn't the bottleneck:
+mqsub --no-email -t 16 -m 96 --hours 2 -- \
+    pixi run --manifest-path benchmarking/pixi.toml bench
+pixi run plot                   # results.tsv -> comparison-t{1,16}.svg
+```
+
+Each tool is run at one thread and at sixteen, giving a single-threaded and a
+multi-threaded comparison, and is timed **four times per configuration** — the
+first run is discarded as a warm-up and the bars show the mean of the remaining
+three with error bars for the standard deviation. All tools emit identical read
+counts per run (55,562,334 / 17,218,060 / 380,432).
+
+**Single-threaded:**
+
+![single-threaded comparison](benchmarking/comparison-t1.svg)
+
+**16 threads:**
+
+![16-thread comparison](benchmarking/comparison-t16.svg)
+
+Wall time in seconds (mean ± stdev of 3 timed runs after a warm-up) on a
+dedicated 16-core compute node:
+
+| run | sracat (C++) t1 | fasterq-dump t1 | fasterq-dump t16 | sracat-rs t1 | sracat-rs t16 |
+| --- | --: | --: | --: | --: | --: |
+| SRR24704796 (2.7 GB, unaligned) | 45.8 ± 1.5 | 28.3 ± 1.5 | 9.6 ± 1.0 | 28.3 ± 0.4 | **8.1 ± 0.8** |
+| ERR12726217 (0.6 GB, unaligned) | 15.8 ± 0.8 | 9.9 ± 0.4 | 4.4 ± 0.2 | 10.3 ± 0.4 | **3.4 ± 0.3** |
+| ERR1540848 (9 MB, cSRA) | 5.1 ± 0.0 | 9.3 ± 2.7 | 11.7 ± 3.4 | 6.7 ± 0.8 | **7.3 ± 0.1** |
+
+(fasterq-dump columns are `--fasta-unsorted` for the unaligned runs and
+`--fasta` sorted for the cSRA. For the cSRA, sracat-rs caps itself to one thread,
+so its `t16` figure is the single-threaded run — see below.)
+
+`fasterq-dump --fasta-unsorted` is multi-threaded but **not order-stable**;
+`fasterq-dump --fasta` (sorted) is deterministic but builds temp files.
+`sracat-rs` is deterministic *and* temp-file-free in every mode and runs against
+current ncbi-vdb (3.x). On the unaligned runs its decode scales with `-t`
+(~3.5× and ~3.0× from 1→16 threads here), landing ~1.2–1.3× faster than
+multi-threaded `fasterq-dump` and well ahead of the C++ `sracat`. On the cSRA,
+`fasterq-dump` actually slows down with more threads (the tiny aligned run
+doesn't amortise the extra workers, hence its wide error bars), so single-thread
+`sracat-rs` is ~1.6× faster than 16-thread `fasterq-dump` with no temp dir —
+though the C++ `sracat` is a little quicker still. Aligned extraction does not
+parallelise, so `sracat-rs` **hard-caps aligned runs to a single thread** (`-t16`
+above is therefore the same single-threaded run; see
+[Aligned (cSRA) runs](#aligned-csra-runs)). Benchmark on dedicated cores — on a
+contended shared node CPU competition masks the thread scaling.
 
 ## Why
 
@@ -16,16 +83,74 @@ Benefits:
 - **Repeatable order.** Reads are emitted in `SEQUENCE`-table row order,
   single-threaded — byte-identical across runs (unlike `fasterq-dump
   --fasta-unsorted` with multiple threads).
-- **Faster.** ~3–4× quicker than the NGS-based C++ `sracat` on the same data
-  (no per-fragment allocations, no NGS virtual-dispatch layer; reads column
-  blobs directly).
+- **Faster.** (with many threads) Quicker than both `fasterq-dump` and the NGS-based C++ `sracat` on
+  the same data (no per-fragment allocations, no NGS virtual-dispatch layer;
+  reads column blobs directly).
 - **Paired / single aware.** Spots with two biological reads are emitted
   interleaved (`/1`, `/2`); spots with a single biological read are routed to a
   separate stream.
-- **Refuses aligned runs.** If the run is aligned (a `PRIMARY_ALIGNMENT` table
-  is present), `READ` in `SEQUENCE` is reconstructed from alignments rather than
-  stored; `sracat-rs` errors out by default instead of silently doing expensive
-  work. Pass `--allow-aligned` to extract them anyway (see below).
+- **Aligned-aware.** Aligned (cSRA) runs are extracted by default by reading the
+  computed `READ` column; pass `--croak-on-aligned` to refuse them instead.
+
+## Algorithmic approach
+
+`sracat-rs` treats an SRA run as a column store and walks it row by row, doing
+the read-pairing logic itself instead of delegating to the NGS fragment
+iterator.
+
+1. **Open through the VDB cursor API.** A small C shim (`shim.c`, wrapped by
+   `src/ffi.rs`) opens the run with `ncbi-vdb` and adds cursor columns on the
+   `SEQUENCE` table:
+   - `(INSDC:dna:text)READ` — the concatenated bases for a spot,
+   - `(INSDC:coord:len)READ_LEN` — the length of each read within the spot,
+   - `(INSDC:SRA:read_type)READ_TYPE` — per-read flags (the low bit marks a
+     *biological* read vs. a technical one such as an adapter/barcode),
+   - `(INSDC:quality:phred)QUALITY` — only when `--qual` is requested.
+
+2. **Detect aligned runs.** If the object is a database containing a
+   `PRIMARY_ALIGNMENT` table, the stored `READ` is reconstructed from alignments
+   rather than held verbatim. The shim reports this; by default such runs are
+   extracted anyway (and forced single-threaded, since reconstruction does not
+   parallelise — step 6), while `--croak-on-aligned` opts into refusing them (see
+   [Aligned (cSRA) runs](#aligned-csra-runs)).
+
+3. **Iterate spots in storage order.** Rows are visited from `first_row()` for
+   `row_count()` rows — i.e. in the physical order blobs are stored, *not* spot
+   submission order. This is what makes the output deterministic and
+   sequential-IO friendly. For each spot the shim returns borrowed slices into
+   the cursor's blob (bases, optional qualities, `READ_LEN`, `READ_TYPE`) with
+   no copy.
+
+4. **Split and classify each spot.** Using `READ_LEN` as offsets into the `READ`
+   blob, each spot is sliced into its component reads. Technical reads are
+   dropped unless `--include-technical`. The number of *selected* (biological)
+   reads decides routing:
+   - **0** → spot skipped (counted as "no biological reads"),
+   - **1** → a single/orphan read → the **single** stream,
+   - **2** → a mate pair → emitted **interleaved** (`/1` then `/2`) to the
+     **paired** stream,
+   - **>2** → an error (unusual layout; rerun with `--include-technical` to
+     inspect).
+
+   Read names are `‹run›.‹row›` (with `/1`, `/2` suffixes for pairs), where
+   `‹run›` is the file stem.
+
+5. **Format and write.** FASTA by default, or FASTQ with `--qual` (phred scores
+   are offset by 33 into ASCII in a reused scratch buffer). Paired reads go to
+   stdout (or `‹prefix›.paired.{fasta,fastq}`); single reads go to `--single-out`
+   / `‹prefix›.single.{fasta,fastq}`. If a single read appears with no
+   destination configured, `sracat-rs` errors rather than silently dropping it.
+
+6. **Optional parallel decode (`-t N`).** Decoding (especially `QUALITY`) is the
+   CPU bottleneck. With `N > 1`, the row range is split into fixed-size chunks
+   (8192 spots). Each worker owns its own cursor and claims the next chunk via an
+   atomic counter, formats it into in-memory buffers, and hands `(chunk-index,
+   buffers)` to a single writer thread, which reorders chunks by index (through a
+   `BTreeMap`) and emits them consecutively — so the output is **byte-identical
+   to the single-threaded run**, with no temp files. Memory stays flat via a
+   **bounded buffer**: a window caps how many chunks may be decoded ahead of the
+   writer (workers spin/yield when they get too far in front), so peak memory is
+   `O(threads × chunk)` rather than growing with the run size.
 
 ## Build
 
@@ -46,18 +171,20 @@ as long as that environment still exists.
 
 ```
 sracat-rs [OPTIONS] <SRA>...
-
-  -o, --output-prefix <PREFIX>   write pairs to <PREFIX>.paired.{fasta,fastq}
-                                 and singles to <PREFIX>.single.{fasta,fastq}
-      --single-out <FILE>        when streaming pairs to stdout, write
-                                 single/orphan reads here
-      --qual                     write FASTQ (with quality) instead of FASTA
-      --include-technical        include technical reads (default: biological only)
-  -t, --threads <N>              parallel extraction threads (default 1)
-      --temp <DIR>               temp dir for --threads > 1
 ```
 
-Default behaviour streams interleaved paired reads to **stdout**. If the run
+| option | meaning |
+| ------ | ------- |
+| `<SRA>...` | one or more `.sra` files or accessions (output concatenated) |
+| `-o, --output-prefix <PREFIX>` | write pairs to `<PREFIX>.paired.{fasta,fastq}` and singles to `<PREFIX>.single.{fasta,fastq}` instead of streaming to stdout |
+| `--single-out <FILE>` | when streaming pairs to stdout, send single/orphan reads here |
+| `--qual` | write FASTQ (sequence + quality) instead of FASTA |
+| `--include-technical` | include technical reads (default: biological only) |
+| `--croak-on-aligned` | refuse aligned (cSRA) runs instead of extracting them (default: extract) |
+| `-t, --threads <N>` | parallel decode threads (default 1); output stays byte-identical. Ignored for aligned (cSRA) runs, which are always single-threaded |
+| `-h, --help` / `-V, --version` | help / version |
+
+Default behaviour streams interleaved **paired** reads to **stdout**. If the run
 contains any unpaired (single/orphan) reads and no destination for them is
 given, `sracat-rs` refuses rather than dropping them — pass `--single-out` or
 `-o`.
@@ -69,69 +196,32 @@ sracat-rs run.sra | head
 # split paired and single output into files
 sracat-rs -o out run.sra            # -> out.paired.fasta, out.single.fasta
 
-# a single-end run, streaming pairs (none) to stdout and singles to a file
+# a single-end run: pairs (none) to stdout, singles to a file
 sracat-rs --single-out singles.fasta run.sra
 
 # FASTQ, split output, 16 threads
 sracat-rs --qual -t 16 -o out run.sra
+
+# refuse aligned (cSRA) runs rather than extracting them
+sracat-rs --croak-on-aligned run.sra
 ```
-
-## Threads
-
-`--threads N` (N > 1) decodes contiguous row ranges in parallel — each worker
-owns a cursor and formats chunks into memory buffers, which a single writer
-thread emits in chunk order through a bounded channel (no temp files). The
-output is **byte-identical** to the single-threaded run (verified by md5 for
-both FASTA and FASTQ). Decoding (especially `QUALITY`) is the CPU bottleneck;
-formatting/writing is only ~15–20% of the time, so this parallelises the part
-that matters.
-
-Benchmark on a dedicated allocation (not a shared login node — CPU contention
-there hides scaling entirely).
-
-## Benchmarks
-
-`./benchmark.sh <file.sra> [threads]` times `sracat-rs` against the C++ `sracat`
-and `fasterq-dump`, reporting wall time and read counts.
-
-**2.7 GB run (SRR24704796), 8 dedicated cores:**
-
-| tool                                | time    | speedup |
-| ----------------------------------- | ------- | ------- |
-| C++ sracat (1 thread)               | 40.9 s  | —       |
-| fasterq-dump `--fasta-unsorted` -e1 | 24.2 s  |         |
-| fasterq-dump `--fasta-unsorted` -e8 | 7.5 s   |         |
-| sracat-rs -t1                       | 21.8 s  | 1.0×    |
-| sracat-rs -t2                       | 11.3 s  | 1.9×    |
-| sracat-rs -t4                       | 5.8 s   | 3.8×    |
-| **sracat-rs -t8**                   | 3.5 s   | 6.2×    |
-
-`sracat-rs` scales near-linearly to the 8 available cores. At -t8 it is ~2.1×
-faster than `fasterq-dump -e8` and ~12× faster than the single-threaded C++
-`sracat`; even -t1 beats the C++ tool (~1.9×) and matches single-threaded
-fasterq-dump — while being deterministic and running against current ncbi-vdb
-(3.x). (Benchmark on dedicated cores: on a contended shared node, scaling is
-masked by CPU competition.)
 
 ## Aligned (cSRA) runs
 
-By default aligned runs are refused. With `--allow-aligned`, `sracat-rs` extracts
-them by reading the computed `READ` column, which ncbi-vdb reconstructs per spot
-from the alignment table — correct, spot-ordered, **interleaved pairs, no temp
-files** (unlike `fasterq-dump`'s default dump-and-sort in the temp dir). Output
-is verified byte-identical (sorted) to `fasterq-dump --fasta` on the same run.
+Aligned runs are **extracted by default**: `sracat-rs` reads the computed `READ`
+column, which ncbi-vdb reconstructs per spot from the alignment table — correct,
+spot-ordered, **interleaved pairs, no temp files** (unlike `fasterq-dump`'s
+default dump-and-sort in the temp dir). Output is verified byte-identical
+(sorted) to `fasterq-dump --fasta` on the same run. Pass `--croak-on-aligned` to
+refuse such runs instead (e.g. to avoid the cost below by mistake).
 
-cSRA ERR1540848 (9 MB, 190k spots), all biological reads:
-
-| tool                                  | time   |
-| ------------------------------------- | ------ |
-| **sracat-rs --allow-aligned -t1**     | 2.39 s |
-| sracat-rs --allow-aligned -t8         | 2.45 s |
-| fasterq-dump `--fasta` (sorted) -e8   | 3.94 s |
-| fasterq-dump `--fasta-unsorted` -e8   | 3.94 s |
-
-~1.6× faster than fasterq-dump with no temp dir. Caveat: reconstruction does
-random access into the alignment table and **does not scale with `-t`** (it
-appears serialized inside ncbi-vdb), unlike unaligned runs. For large aligned
+**Aligned extraction is always single-threaded.** Reconstruction does random
+access into the alignment table, and that access does not parallelise: with
+multiple cursors it does not just fail to speed up but degrades
+*catastrophically* (in testing, `-t16` on the cSRA made almost no progress and
+blew a 600 s timeout, apparently from concurrent cursors thrashing/serialising
+inside ncbi-vdb). So `sracat-rs` **hard-caps aligned runs to one thread**: if you
+pass `-t > 1` on a cSRA it extracts single-threaded anyway and prints a note
+(`note: <run> is aligned (cSRA); extracting single-threaded`). For large aligned
 runs a bounded mate-pairing window over the alignment table (streaming, no sort)
 would be the next step.

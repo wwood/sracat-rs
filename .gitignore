@@ -1,9 +1,20 @@
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+/benchmarking/.pixi/
 
 # rust build artifacts
 /target
+
+# benchmarking build artifact + verbose log
+# (results.tsv + comparison-t*.svg are kept)
+/benchmarking/sracat-cpp
+/benchmarking/bench_big.txt
+# downloaded SRA inputs + snakemake bookkeeping
+/benchmarking/data/
+/benchmarking/logs/
+/benchmarking/benchmarks/
+/benchmarking/.snakemake/
 
 # stray extraction output
 *.fasta

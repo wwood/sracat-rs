@@ -32,6 +32,11 @@ int sracat_open(const char *path, int with_quality, int allow_aligned,
 int64_t sracat_first_row(const SracatRun *run);
 uint64_t sracat_row_count(const SracatRun *run);
 
+/* Nonzero if the run is aligned (a PRIMARY_ALIGNMENT table is present, so READ
+ * is reconstructed from alignments). Reconstruction uses random access that does
+ * not parallelise, so callers should extract aligned runs single-threaded. */
+int sracat_is_aligned(const SracatRun *run);
+
 /* Read one spot at absolute row id.
  * On success (returns 0):
  *   *bases     -> ASCII read bases for the whole spot, length *nbases

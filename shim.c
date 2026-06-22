@@ -21,6 +21,7 @@ struct SracatRun {
     uint32_t read_type_idx;
     uint32_t qual_idx; /* valid only if has_qual */
     int has_qual;
+    int is_aligned; /* PRIMARY_ALIGNMENT present: READ is reconstructed */
     int64_t first;
     uint64_t count;
 };
@@ -48,25 +49,28 @@ int sracat_open(const char *path, int with_quality, int allow_aligned,
 
     /* Most SRA runs are databases; legacy runs are flat tables. */
     if (VDBManagerOpenDBRead(r->mgr, &r->db, NULL, "%s", path) == 0) {
-        /* Refuse aligned runs unless explicitly allowed: a PRIMARY_ALIGNMENT
-         * table means READ in the SEQUENCE table is reconstructed from
-         * alignments, not stored. */
+        /* A PRIMARY_ALIGNMENT table means READ in the SEQUENCE table is
+         * reconstructed from alignments, not stored. Detect that (always, so
+         * the caller can react), and refuse unless explicitly allowed. */
         KNamelist *tables = NULL;
-        if (!allow_aligned && VDatabaseListTbl(r->db, &tables) == 0 && tables != NULL) {
+        if (VDatabaseListTbl(r->db, &tables) == 0 && tables != NULL) {
             uint32_t n = 0;
             KNamelistCount(tables, &n);
             for (uint32_t i = 0; i < n; i++) {
                 const char *nm = NULL;
                 if (KNamelistGet(tables, i, &nm) == 0 && nm != NULL &&
                     strcmp(nm, "PRIMARY_ALIGNMENT") == 0) {
-                    KNamelistRelease(tables);
-                    seterr(errbuf, errlen,
-                           "aligned run (PRIMARY_ALIGNMENT present): READ is "
-                           "reconstructed from alignments, refusing");
-                    goto fail;
+                    r->is_aligned = 1;
+                    break;
                 }
             }
             KNamelistRelease(tables);
+        }
+        if (r->is_aligned && !allow_aligned) {
+            seterr(errbuf, errlen,
+                   "aligned run (PRIMARY_ALIGNMENT present): READ is "
+                   "reconstructed from alignments, refusing");
+            goto fail;
         }
         if (VDatabaseOpenTableRead(r->db, &r->tbl, "SEQUENCE") != 0) {
             seterr(errbuf, errlen, "could not open SEQUENCE table");
@@ -117,6 +121,7 @@ fail:
 
 int64_t sracat_first_row(const SracatRun *run) { return run->first; }
 uint64_t sracat_row_count(const SracatRun *run) { return run->count; }
+int sracat_is_aligned(const SracatRun *run) { return run->is_aligned; }
 
 static int cell(const VCursor *curs, int64_t row, uint32_t idx,
                 uint32_t want_bits, const void **base, uint32_t *len,

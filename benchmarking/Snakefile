@@ -1,0 +1,42 @@
+# Download the SRA inputs used by the sracat-rs benchmark, via kingfisher.
+#
+# Run in the `download` pixi environment (kept separate from the build/run env
+# because kingfisher/prefetch want current ncbi-vdb, which conflicts with the
+# ncbi-vdb 2.11 pin the C++ sracat needs):
+#
+#   pixi run -e download download                      # all inputs, locally
+#   pixi run -e download -- snakemake --profile aqua   # one queue job per file
+#
+# Each run is fetched as data/<acc>/<acc>.sra. bigbench.sh reads these paths.
+
+# acc -> human description (used only for the log header).
+RUNS = {
+    "SRR24704796": "unaligned, ~2.7 GB",
+    "ERR12726217": "unaligned, ~0.6 GB",
+    "ERR1540848": "aligned cSRA, ~9 MB",
+}
+
+
+rule all:
+    input:
+        expand("data/{acc}/{acc}.sra", acc=RUNS),
+
+
+rule kingfisher_get:
+    output:
+        "data/{acc}/{acc}.sra",
+    log:
+        "logs/kingfisher_{acc}.log",
+    benchmark:
+        "benchmarks/kingfisher_{acc}.tsv"
+    threads: 4
+    shell:
+        # kingfisher writes <acc>.sra into its working directory; run it inside
+        # the per-accession output dir. The redirect is applied by the outer
+        # shell, so {log} stays relative to the Snakefile dir.
+        "mkdir -p data/{wildcards.acc} && "
+        "( cd data/{wildcards.acc} && "
+        "  kingfisher get -r {wildcards.acc} "
+        "    -m prefetch aws-http "
+        "    -f sra --download-threads {threads} ) "
+        "> {log} 2>&1"

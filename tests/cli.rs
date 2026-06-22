@@ -28,47 +28,72 @@ fn missing_file_fails() {
         .unwrap();
 }
 
-/// Aligned (cSRA) runs must be refused. Uses the local fixture pulled by
-/// `pixi run fetch-testdata` (ERR1540848: a small S. pneumoniae cSRA run with a
-/// PRIMARY_ALIGNMENT table). Skips if the fixture has not been fetched.
+/// Aligned (cSRA) runs are extracted by default (READ reconstructed from the
+/// alignment table). Uses the local fixture pulled by `pixi run fetch-testdata`
+/// (ERR1540848: a small S. pneumoniae cSRA run with a PRIMARY_ALIGNMENT table).
+/// Skips if the fixture has not been fetched.
 #[test]
-fn aligned_run_croaks() {
-    let f = format!(
-        "{}/tests/data/ERR1540848/ERR1540848.sra",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    if !std::path::Path::new(&f).exists() {
-        eprintln!("skipping aligned_run_croaks: {f} not present (run: pixi run fetch-testdata)");
-        return;
-    }
-    Assert::main_binary()
-        .with_args(&[f.as_str()])
-        .fails()
-        .stderr()
-        .contains("aligned")
-        .unwrap();
-}
-
-/// With --allow-aligned, the same cSRA run is extracted (READ reconstructed from
-/// the alignment table) rather than refused. Uses the fetched fixture; skips if
-/// absent.
-#[test]
-fn allow_aligned_extracts() {
+fn aligned_run_extracts_by_default() {
     let f = format!(
         "{}/tests/data/ERR1540848/ERR1540848.sra",
         env!("CARGO_MANIFEST_DIR")
     );
     if !std::path::Path::new(&f).exists() {
         eprintln!(
-            "skipping allow_aligned_extracts: {f} not present (run: pixi run fetch-testdata)"
+            "skipping aligned_run_extracts_by_default: {f} not present (run: pixi run fetch-testdata)"
         );
         return;
     }
     Assert::main_binary()
-        .with_args(&["--allow-aligned", "--single-out", "/dev/null", f.as_str()])
+        .with_args(&["--single-out", "/dev/null", f.as_str()])
         .succeeds()
         .stdout()
         .contains(">ERR1540848.")
+        .unwrap();
+}
+
+/// With --croak-on-aligned, the same cSRA run is refused rather than extracted.
+/// Uses the fetched fixture; skips if absent.
+#[test]
+fn croak_on_aligned_refuses() {
+    let f = format!(
+        "{}/tests/data/ERR1540848/ERR1540848.sra",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&f).exists() {
+        eprintln!(
+            "skipping croak_on_aligned_refuses: {f} not present (run: pixi run fetch-testdata)"
+        );
+        return;
+    }
+    Assert::main_binary()
+        .with_args(&["--croak-on-aligned", f.as_str()])
+        .fails()
+        .stderr()
+        .contains("aligned")
+        .unwrap();
+}
+
+/// Aligned reconstruction does not parallelise, so -t > 1 on an aligned run is
+/// capped to a single thread (with a note) rather than running the pathological
+/// multi-cursor path. Uses the fetched fixture; skips if absent.
+#[test]
+fn aligned_run_caps_threads_to_one() {
+    let f = format!(
+        "{}/tests/data/ERR1540848/ERR1540848.sra",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&f).exists() {
+        eprintln!(
+            "skipping aligned_run_caps_threads_to_one: {f} not present (run: pixi run fetch-testdata)"
+        );
+        return;
+    }
+    Assert::main_binary()
+        .with_args(&["-t", "8", "--single-out", "/dev/null", f.as_str()])
+        .succeeds()
+        .stderr()
+        .contains("single-threaded")
         .unwrap();
 }
 

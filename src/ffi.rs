@@ -23,6 +23,7 @@ extern "C" {
     ) -> c_int;
     fn sracat_first_row(run: *const SracatRun) -> i64;
     fn sracat_row_count(run: *const SracatRun) -> u64;
+    fn sracat_is_aligned(run: *const SracatRun) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn sracat_read_spot(
         run: *const SracatRun,
@@ -86,6 +87,12 @@ impl Run {
 
     pub fn row_count(&self) -> u64 {
         unsafe { sracat_row_count(self.ptr) }
+    }
+
+    /// Whether the run is aligned (cSRA): `READ` is reconstructed from the
+    /// alignment table via random access, which does not parallelise.
+    pub fn is_aligned(&self) -> bool {
+        unsafe { sracat_is_aligned(self.ptr) != 0 }
     }
 
     pub fn read_spot(&self, row: i64) -> Result<Spot<'_>> {

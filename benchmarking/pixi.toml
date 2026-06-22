@@ -1,0 +1,53 @@
+[workspace]
+authors = ["Ben Woodcroft <benjwoodcroft@gmail.com>"]
+channels = ["conda-forge", "bioconda"]
+name = "sracat-rs-benchmarking"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+# Benchmarking environment for comparing sracat-rs against the original C++
+# `sracat` and `fasterq-dump`.
+#
+# Two environments:
+#   default  - build + run + plot the benchmark. The original `sracat` is built
+#              from the sibling ../sracat/sracat.cpp against the legacy NGS C++
+#              engine, which only ships in ncbi-vdb 2.x (hence the 2.11.0 pin +
+#              ncbi-ngs-sdk, mirroring ../sracat/pixi.toml). sra-tools provides
+#              fasterq-dump; python/matplotlib/polars render the graphs.
+#   download - fetch the benchmark SRA inputs with kingfisher, driven by
+#              Snakefile. Kept separate because kingfisher/prefetch want current
+#              ncbi-vdb (3.x), which conflicts with the 2.11 pin above.
+
+[tasks]
+# Build the original C++ sracat from the sibling source against the conda
+# ncbi-vdb 2.11.0 + NGS libraries (mirrors ../sracat/Makefile).
+build-cpp = """c++ -O3 -Wall -I$CONDA_PREFIX/include -o sracat-cpp ../../sracat/sracat.cpp \
+  -lm -lz -lpthread -L$CONDA_PREFIX/lib64 -L$CONDA_PREFIX/lib \
+  -lncbi-ngs-c++ -lncbi-ngs -lngs-c++ -lncbi-vdb-static -ldl"""
+# Run the benchmark sweep over the SRA inputs, writing results.tsv.
+bench = "bash bigbench.sh"
+# Render results.tsv -> comparison-t{1,16}.svg.
+plot = "python plot.py"
+
+[dependencies]
+ncbi-vdb = "==2.11.0"
+ncbi-ngs-sdk = "*"
+zlib = "*"
+make = "*"
+cxx-compiler = "*"
+sra-tools = ">=3.4.1,<4"
+python = ">=3.11"
+matplotlib-base = "*"
+polars = "*"
+
+# Download the benchmark inputs with kingfisher (see Snakefile).
+[feature.download.dependencies]
+kingfisher = ">=0.4.1"
+snakemake = ">=9,<10"
+python = "=3.11"
+
+[feature.download.tasks]
+download = "snakemake --cores 4"
+
+[environments]
+download = { features = ["download"], no-default-feature = true }

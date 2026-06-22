@@ -41,11 +41,13 @@ struct Cli {
     #[arg(long)]
     include_technical: bool,
 
-    /// Extract aligned (cSRA) runs instead of refusing them. READ is
-    /// reconstructed from the alignment table (correct, spot-ordered, no temp
-    /// files), at the cost of random access into that table.
+    /// Refuse aligned (cSRA) runs instead of extracting them. By default aligned
+    /// runs are extracted by reading the computed READ column, which ncbi-vdb
+    /// reconstructs per spot from the alignment table (correct, spot-ordered, no
+    /// temp files) at the cost of random access into that table; pass this flag
+    /// to error out on such runs instead.
     #[arg(long)]
-    allow_aligned: bool,
+    croak_on_aligned: bool,
 
     /// Number of extraction threads. >1 decodes contiguous row ranges in
     /// parallel and writes them in order through a single writer (still
@@ -140,7 +142,9 @@ fn main() -> Result<()> {
     let opts = Opts {
         qual: cli.qual,
         include_technical: cli.include_technical,
-        allow_aligned: cli.allow_aligned,
+        // Aligned runs are extracted by default; --croak-on-aligned opts back
+        // into refusing them.
+        allow_aligned: !cli.croak_on_aligned,
         bench_read_only: cli.bench_read_only,
     };
     let ext = if cli.qual { "fastq" } else { "fasta" };
@@ -167,12 +171,23 @@ fn main() -> Result<()> {
     let mut totals = Counts::default();
     for input in &cli.inputs {
         let name = derive_name(input);
-        let c = if threads == 1 {
-            let run = Run::open(input, opts.qual, opts.allow_aligned)?;
+        // Open once up front. Aligned (cSRA) reconstruction does random access
+        // into the alignment table that does not parallelise — with multiple
+        // cursors it degrades catastrophically — so hard-cap aligned runs to a
+        // single thread regardless of -t.
+        let run = Run::open(input, opts.qual, opts.allow_aligned)?;
+        let eff_threads = if run.is_aligned() { 1 } else { threads };
+        if eff_threads < threads {
+            eprintln!(
+                "note: {name} is aligned (cSRA); extracting single-threaded (-t{threads} ignored)"
+            );
+        }
+        let c = if eff_threads == 1 {
             let (lo, hi) = (run.first_row(), run.first_row() + run.row_count() as i64);
             extract_range(&run, lo, hi, &name, &mut paired, &mut single, opts)?
         } else {
-            extract_parallel(input, &name, threads, &mut paired, &mut single, opts)?
+            drop(run); // workers open their own cursors in extract_parallel
+            extract_parallel(input, &name, eff_threads, &mut paired, &mut single, opts)?
         };
         totals.add(c);
     }
