@@ -21,6 +21,7 @@
 
 # test data pulled on demand by Snakemake (pixi run fetch-testdata)
 /tests/data/ERR1540848/
+/tests/data/DRR033172/
 /logs/
 /benchmarks/
 /.snakemake/

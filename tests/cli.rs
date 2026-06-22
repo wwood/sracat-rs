@@ -164,6 +164,72 @@ fn split_output_to_read1_read2() {
     let _ = std::fs::remove_file(&r2);
 }
 
+/// Split pairs from a real unaligned paired run at both -t1 and -t4, and check
+/// the parallel output is byte-identical to single-threaded. Uses DRR033172
+/// (46,282 pairs over several decode chunks), fetched by `pixi run
+/// fetch-testdata`; skips if absent. Timeout-guarded against a parallel hang.
+#[test]
+fn split_unaligned_pairs_t1_eq_t4() {
+    let f = format!(
+        "{}/tests/data/DRR033172/DRR033172.sra",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&f).exists() {
+        eprintln!(
+            "skipping split_unaligned_pairs_t1_eq_t4: {f} not present (run: pixi run fetch-testdata)"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let p = |tag: &str| format!("{}/sracat_rs_{tag}.fasta", dir.display());
+    let (a1, a2, b1, b2) = (p("u_t1_r1"), p("u_t1_r2"), p("u_t4_r1"), p("u_t4_r2"));
+    for x in [&a1, &a2, &b1, &b2] {
+        let _ = std::fs::remove_file(x);
+    }
+
+    assert!(
+        run_within(60, &["-1", &a1, "-2", &a2, f.as_str()]),
+        "t1 split did not succeed"
+    );
+    assert!(
+        run_within(60, &["-t", "4", "-1", &b1, "-2", &b2, f.as_str()]),
+        "t4 split did not succeed (blocked?)"
+    );
+
+    let read = |path: &str| std::fs::read_to_string(path).expect("split output written");
+    let (r1a, r2a, r1b, r2b) = (read(&a1), read(&a2), read(&b1), read(&b2));
+
+    // Parallel output must be byte-identical to single-threaded.
+    assert_eq!(r1a, r1b, "read1 differs between -t1 and -t4");
+    assert_eq!(r2a, r2b, "read2 differs between -t1 and -t4");
+
+    // Correct split: equal counts, spanning >1 chunk, forward /1 and reverse /2.
+    let heads = |s: &str| -> Vec<String> {
+        s.lines()
+            .filter(|l| l.starts_with('>'))
+            .map(str::to_string)
+            .collect()
+    };
+    let (h1, h2) = (heads(&r1a), heads(&r2a));
+    assert_eq!(h1.len(), h2.len(), "unequal read1/read2 counts");
+    assert!(
+        h1.len() > 8192,
+        "fixture should span multiple decode chunks"
+    );
+    assert!(
+        h1.iter().all(|h| h.ends_with("/1")),
+        "read1 headers must be /1"
+    );
+    assert!(
+        h2.iter().all(|h| h.ends_with("/2")),
+        "read2 headers must be /2"
+    );
+
+    for x in [&a1, &a2, &b1, &b2] {
+        let _ = std::fs::remove_file(x);
+    }
+}
+
 /// `-1`/`-2` with multiple threads must run the parallel writer to completion,
 /// not deadlock. The single-end fixture exercises the parallel decode path; its
 /// reads are orphans, so they go to --single-out. Timeout-guarded so a hang
