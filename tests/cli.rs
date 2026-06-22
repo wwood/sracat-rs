@@ -97,6 +97,73 @@ fn aligned_run_caps_threads_to_one() {
         .unwrap();
 }
 
+/// `-1`/`-2` split paired output: forward reads (with `/1`) to the first file,
+/// reverse reads (with `/2`) to the second. Uses the aligned (paired) fixture;
+/// skips if absent.
+#[test]
+fn split_output_to_read1_read2() {
+    let f = format!(
+        "{}/tests/data/ERR1540848/ERR1540848.sra",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&f).exists() {
+        eprintln!(
+            "skipping split_output_to_read1_read2: {f} not present (run: pixi run fetch-testdata)"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let r1 = format!("{}/sracat_rs_split_r1.fasta", dir.display());
+    let r2 = format!("{}/sracat_rs_split_r2.fasta", dir.display());
+    let _ = std::fs::remove_file(&r1);
+    let _ = std::fs::remove_file(&r2);
+    Assert::main_binary()
+        .with_args(&["-1", r1.as_str(), "-2", r2.as_str(), f.as_str()])
+        .succeeds()
+        .unwrap();
+    let b1 = std::fs::read_to_string(&r1).expect("read1 written");
+    let b2 = std::fs::read_to_string(&r2).expect("read2 written");
+    assert!(
+        b1.contains(">ERR1540848.") && b1.contains("/1"),
+        "read1 has /1"
+    );
+    assert!(
+        b2.contains(">ERR1540848.") && b2.contains("/2"),
+        "read2 has /2"
+    );
+    assert!(!b1.contains("/2"), "read1 must not contain reverse reads");
+    assert!(!b2.contains("/1"), "read2 must not contain forward reads");
+    let _ = std::fs::remove_file(&r1);
+    let _ = std::fs::remove_file(&r2);
+}
+
+/// `-1` requires `-2` (and vice versa): clap rejects one without the other.
+#[test]
+fn read1_requires_read2() {
+    Assert::main_binary()
+        .with_args(&["-1", "/tmp/sracat_rs_only_r1.fasta", fixture().as_str()])
+        .fails()
+        .unwrap();
+}
+
+/// With `-1`/`-2` and an unpaired read but no single destination, refuse rather
+/// than drop it (the fixture is single-end).
+#[test]
+fn split_without_single_sink_croaks() {
+    Assert::main_binary()
+        .with_args(&[
+            "-1",
+            "/tmp/sracat_rs_split_a.fasta",
+            "-2",
+            "/tmp/sracat_rs_split_b.fasta",
+            fixture().as_str(),
+        ])
+        .fails()
+        .stderr()
+        .contains("unpaired")
+        .unwrap();
+}
+
 #[test]
 fn single_end_without_sink_croaks() {
     // The fixture is single-end, so with pairs going to stdout and no single

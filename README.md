@@ -90,6 +90,11 @@ Benefits:
 - **Paired / single aware.** Spots with two biological reads are emitted
   interleaved (`/1`, `/2`); spots with a single biological read are routed to a
   separate stream.
+- **Flexible streaming output.** Pick the shape that fits the next tool, all
+  without temp files: interleaved pairs to **stdout** (pipe straight into a
+  mapper/assembler), split mates into separate **`-1`/`-2`** files, or prefixed
+  files — while single/orphan reads are always routed to their own destination
+  (and never silently dropped).
 - **Aligned-aware.** Aligned (cSRA) runs are extracted by default by reading the
   computed `READ` column; pass `--croak-on-aligned` to refuse them instead.
 
@@ -137,10 +142,12 @@ iterator.
    `‹run›` is the file stem.
 
 5. **Format and write.** FASTA by default, or FASTQ with `--qual` (phred scores
-   are offset by 33 into ASCII in a reused scratch buffer). Paired reads go to
-   stdout (or `‹prefix›.paired.{fasta,fastq}`); single reads go to `--single-out`
-   / `‹prefix›.single.{fasta,fastq}`. If a single read appears with no
-   destination configured, `sracat-rs` errors rather than silently dropping it.
+   are offset by 33 into ASCII in a reused scratch buffer). Paired reads are
+   emitted interleaved to stdout (or `‹prefix›.paired.{fasta,fastq}`), or split
+   with `-1`/`-2` (forward read to one file, reverse to the other); single reads
+   go to `--single-out` / `‹prefix›.single.{fasta,fastq}`. If a single read
+   appears with no destination configured, `sracat-rs` errors rather than
+   silently dropping it.
 
 6. **Optional parallel decode (`-t N`).** Decoding (especially `QUALITY`) is the
    CPU bottleneck. With `N > 1`, the row range is split into fixed-size chunks
@@ -178,24 +185,30 @@ sracat-rs [OPTIONS] <SRA>...
 | ------ | ------- |
 | `<SRA>...` | one or more `.sra` files or accessions (output concatenated) |
 | `-o, --output-prefix <PREFIX>` | write pairs to `<PREFIX>.paired.{fasta,fastq}` and singles to `<PREFIX>.single.{fasta,fastq}` instead of streaming to stdout |
-| `--single-out <FILE>` | when streaming pairs to stdout, send single/orphan reads here |
+| `-1, --read1 <FILE>` | split pairs: write the forward read of each pair here (requires `-2`; mutually exclusive with `-o`) |
+| `-2, --read2 <FILE>` | split pairs: write the reverse read of each pair here (requires `-1`) |
+| `--single-out <FILE>` | when streaming/splitting pairs, send single/orphan reads here |
 | `--qual` | write FASTQ (sequence + quality) instead of FASTA |
 | `--include-technical` | include technical reads (default: biological only) |
 | `--croak-on-aligned` | refuse aligned (cSRA) runs instead of extracting them (default: extract) |
 | `-t, --threads <N>` | parallel decode threads (default 1); output stays byte-identical. Ignored for aligned (cSRA) runs, which are always single-threaded |
 | `-h, --help` / `-V, --version` | help / version |
 
-Default behaviour streams interleaved **paired** reads to **stdout**. If the run
-contains any unpaired (single/orphan) reads and no destination for them is
-given, `sracat-rs` refuses rather than dropping them — pass `--single-out` or
-`-o`.
+Default behaviour streams interleaved **paired** reads to **stdout**. With
+`-1`/`-2` the pairs are instead split — forward read to `-1`, reverse read to
+`-2` (each read keeps its `/1`,`/2` suffix). In every mode, if the run contains
+any unpaired (single/orphan) reads and no destination for them is given,
+`sracat-rs` refuses rather than dropping them — pass `--single-out` or `-o`.
 
 ```sh
 # stream interleaved pairs to stdout
 sracat-rs run.sra | head
 
-# split paired and single output into files
+# split paired and single output into prefixed files
 sracat-rs -o out run.sra            # -> out.paired.fasta, out.single.fasta
+
+# split mates into separate read1 / read2 files (orphans -> singles.fasta)
+sracat-rs -1 r1.fastq -2 r2.fastq --qual --single-out singles.fastq run.sra
 
 # a single-end run: pairs (none) to stdout, singles to a file
 sracat-rs --single-out singles.fasta run.sra

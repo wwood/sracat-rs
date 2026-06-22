@@ -29,7 +29,31 @@ struct Cli {
     #[arg(short = 'o', long, value_name = "PREFIX")]
     output_prefix: Option<String>,
 
-    /// When streaming pairs to stdout, write single/orphan reads to this file.
+    /// Split paired output: write the forward read of each pair to this file
+    /// (requires -2). Mates are not interleaved. Single/orphan reads still go to
+    /// --single-out (or -o), or the run croaks if neither is given.
+    #[arg(
+        short = '1',
+        long = "read1",
+        value_name = "FILE",
+        requires = "read2",
+        conflicts_with = "output_prefix"
+    )]
+    read1: Option<String>,
+
+    /// Split paired output: write the reverse read of each pair to this file
+    /// (requires -1).
+    #[arg(
+        short = '2',
+        long = "read2",
+        value_name = "FILE",
+        requires = "read1",
+        conflicts_with = "output_prefix"
+    )]
+    read2: Option<String>,
+
+    /// Write single/orphan reads to this file (when pairs are streamed to stdout
+    /// or split via -1/-2).
     #[arg(long, value_name = "FILE")]
     single_out: Option<String>,
 
@@ -80,6 +104,21 @@ impl Counts {
         self.pairs += o.pairs;
         self.singles += o.singles;
         self.skipped += o.skipped;
+    }
+}
+
+/// Where paired reads go. Either one interleaved stream (stdout or
+/// `<prefix>.paired`), or two separate streams with the forward read in the
+/// first and the reverse read in the second (`-1`/`-2`).
+enum PairedSink<'a> {
+    Interleaved(&'a mut dyn Write),
+    Split(&'a mut dyn Write, &'a mut dyn Write),
+}
+
+impl PairedSink<'_> {
+    /// True if mates are split across two streams (`-1`/`-2`).
+    fn is_split(&self) -> bool {
+        matches!(self, PairedSink::Split(..))
     }
 }
 
@@ -149,15 +188,33 @@ fn main() -> Result<()> {
     };
     let ext = if cli.qual { "fastq" } else { "fasta" };
 
-    let mut paired: BufWriter<Box<dyn Write>> = match &cli.output_prefix {
-        Some(prefix) => {
-            let path = format!("{prefix}.paired.{ext}");
-            let f = File::create(&path).with_context(|| format!("creating {path}"))?;
-            BufWriter::with_capacity(1 << 20, Box::new(f))
+    // Paired output: split to two files (-1/-2), else interleaved to one stream
+    // (<prefix>.paired or stdout). The owned writers live here; `paired` borrows
+    // them and is dropped before they are flushed below.
+    let mut inter: Option<BufWriter<Box<dyn Write>>> = None;
+    let mut split: Option<(BufWriter<File>, BufWriter<File>)> = None;
+    match (&cli.read1, &cli.read2) {
+        (Some(r1), Some(r2)) => {
+            let f1 = File::create(r1).with_context(|| format!("creating {r1}"))?;
+            let f2 = File::create(r2).with_context(|| format!("creating {r2}"))?;
+            split = Some((
+                BufWriter::with_capacity(1 << 20, f1),
+                BufWriter::with_capacity(1 << 20, f2),
+            ));
         }
-        None => BufWriter::with_capacity(1 << 20, Box::new(io::stdout().lock())),
-    };
-
+        // clap guarantees -1 and -2 come together, so the remaining cases have
+        // neither set: fall back to an interleaved stream.
+        _ => {
+            inter = Some(match &cli.output_prefix {
+                Some(prefix) => {
+                    let path = format!("{prefix}.paired.{ext}");
+                    let f = File::create(&path).with_context(|| format!("creating {path}"))?;
+                    BufWriter::with_capacity(1 << 20, Box::new(f) as Box<dyn Write>)
+                }
+                None => BufWriter::with_capacity(1 << 20, Box::new(io::stdout().lock())),
+            });
+        }
+    }
     let mut single = SingleWriter {
         dest: match (&cli.output_prefix, &cli.single_out) {
             (Some(prefix), _) => SingleDest::Path(format!("{prefix}.single.{ext}").into()),
@@ -169,30 +226,44 @@ fn main() -> Result<()> {
 
     let threads = cli.threads.max(1);
     let mut totals = Counts::default();
-    for input in &cli.inputs {
-        let name = derive_name(input);
-        // Open once up front. Aligned (cSRA) reconstruction does random access
-        // into the alignment table that does not parallelise — with multiple
-        // cursors it degrades catastrophically — so hard-cap aligned runs to a
-        // single thread regardless of -t.
-        let run = Run::open(input, opts.qual, opts.allow_aligned)?;
-        let eff_threads = if run.is_aligned() { 1 } else { threads };
-        if eff_threads < threads {
-            eprintln!(
-                "note: {name} is aligned (cSRA); extracting single-threaded (-t{threads} ignored)"
-            );
-        }
-        let c = if eff_threads == 1 {
-            let (lo, hi) = (run.first_row(), run.first_row() + run.row_count() as i64);
-            extract_range(&run, lo, hi, &name, &mut paired, &mut single, opts)?
-        } else {
-            drop(run); // workers open their own cursors in extract_parallel
-            extract_parallel(input, &name, eff_threads, &mut paired, &mut single, opts)?
+    // Scoped so `paired`'s borrow of inter/split ends before they are flushed.
+    {
+        let mut paired = match (&mut inter, &mut split) {
+            (Some(w), _) => PairedSink::Interleaved(w),
+            (_, Some((w1, w2))) => PairedSink::Split(w1, w2),
+            _ => unreachable!("one of inter/split is always set"),
         };
-        totals.add(c);
+        for input in &cli.inputs {
+            let name = derive_name(input);
+            // Open once up front. Aligned (cSRA) reconstruction does random
+            // access into the alignment table that does not parallelise — with
+            // multiple cursors it degrades catastrophically — so hard-cap
+            // aligned runs to a single thread regardless of -t.
+            let run = Run::open(input, opts.qual, opts.allow_aligned)?;
+            let eff_threads = if run.is_aligned() { 1 } else { threads };
+            if eff_threads < threads {
+                eprintln!(
+                    "note: {name} is aligned (cSRA); extracting single-threaded (-t{threads} ignored)"
+                );
+            }
+            let c = if eff_threads == 1 {
+                let (lo, hi) = (run.first_row(), run.first_row() + run.row_count() as i64);
+                extract_range(&run, lo, hi, &name, &mut paired, &mut single, opts)?
+            } else {
+                drop(run); // workers open their own cursors in extract_parallel
+                extract_parallel(input, &name, eff_threads, &mut paired, &mut single, opts)?
+            };
+            totals.add(c);
+        }
     }
 
-    paired.flush()?;
+    if let Some(mut w) = inter {
+        w.flush()?;
+    }
+    if let Some((mut w1, mut w2)) = split {
+        w1.flush()?;
+        w2.flush()?;
+    }
     single.finish()?;
     eprintln!("spots paired   : {}", totals.pairs);
     eprintln!("reads single   : {}", totals.singles);
@@ -203,13 +274,13 @@ fn main() -> Result<()> {
 }
 
 /// Extract rows `[lo, hi)` of an opened run, writing paired reads to `paired`
-/// and single reads to `single`.
+/// (interleaved or split) and single reads to `single`.
 fn extract_range(
     run: &Run,
     lo: i64,
     hi: i64,
     name: &str,
-    paired: &mut dyn Write,
+    paired: &mut PairedSink<'_>,
     single: &mut dyn Write,
     opts: Opts,
 ) -> Result<Counts> {
@@ -243,8 +314,16 @@ fn extract_range(
                 if !opts.bench_read_only {
                     let (o0, l0) = sel[0];
                     let (o1, l1) = sel[1];
-                    write_read(paired, name, row, Some(1), &spot, o0, l0, &mut qbuf)?;
-                    write_read(paired, name, row, Some(2), &spot, o1, l1, &mut qbuf)?;
+                    match paired {
+                        PairedSink::Interleaved(w) => {
+                            write_read(&mut **w, name, row, Some(1), &spot, o0, l0, &mut qbuf)?;
+                            write_read(&mut **w, name, row, Some(2), &spot, o1, l1, &mut qbuf)?;
+                        }
+                        PairedSink::Split(w1, w2) => {
+                            write_read(&mut **w1, name, row, Some(1), &spot, o0, l0, &mut qbuf)?;
+                            write_read(&mut **w2, name, row, Some(2), &spot, o1, l1, &mut qbuf)?;
+                        }
+                    }
                 }
                 counts.pairs += 1;
             }
@@ -266,7 +345,7 @@ fn extract_parallel(
     input: &str,
     name: &str,
     threads: usize,
-    paired: &mut dyn Write,
+    paired: &mut PairedSink<'_>,
     single: &mut dyn Write,
     opts: Opts,
 ) -> Result<Counts> {
@@ -280,6 +359,7 @@ fn extract_parallel(
         (run.first_row(), run.row_count())
     };
     let hi = first + count as i64;
+    let split = paired.is_split(); // whether workers format two buffers or one
 
     const CHUNK: i64 = 8192; // spots per work unit
     let window = threads as u64 * 4; // max chunks decoded ahead of the writer
@@ -287,7 +367,9 @@ fn extract_parallel(
     let next_chunk = AtomicU64::new(0); // next chunk index to hand out
     let next_write = AtomicU64::new(0); // next chunk index still to be written
 
-    type Msg = Result<(u64, Vec<u8>, Vec<u8>, Counts)>;
+    // Formatted output for one chunk: (forward/interleaved, reverse, single).
+    type Bufs = (Vec<u8>, Vec<u8>, Vec<u8>);
+    type Msg = Result<(u64, Bufs, Counts)>;
     let (tx, rx) = sync_channel::<Msg>(threads * 2);
 
     std::thread::scope(|scope| -> Result<Counts> {
@@ -320,10 +402,18 @@ fn extract_parallel(
                     }
                     let lo = first + idx as i64 * CHUNK;
                     let chi = (lo + CHUNK).min(hi);
-                    let mut pbuf = Vec::new();
+                    let mut p1 = Vec::new(); // forward, or interleaved when not split
+                    let mut p2 = Vec::new(); // reverse (split only)
                     let mut sbuf = Vec::new();
-                    let msg = extract_range(&run, lo, chi, name, &mut pbuf, &mut sbuf, opts)
-                        .map(|c| (idx, pbuf, sbuf, c));
+                    let res = {
+                        let mut ps = if split {
+                            PairedSink::Split(&mut p1, &mut p2)
+                        } else {
+                            PairedSink::Interleaved(&mut p1)
+                        };
+                        extract_range(&run, lo, chi, name, &mut ps, &mut sbuf, opts)
+                    };
+                    let msg = res.map(|c| (idx, (p1, p2, sbuf), c));
                     let failed = msg.is_err();
                     if tx.send(msg).is_err() || failed {
                         break;
@@ -335,14 +425,20 @@ fn extract_parallel(
 
         // Writer: reorder by chunk index and emit consecutively.
         let mut counts = Counts::default();
-        let mut pending: BTreeMap<u64, (Vec<u8>, Vec<u8>)> = BTreeMap::new();
+        let mut pending: BTreeMap<u64, Bufs> = BTreeMap::new();
         let mut expected = 0u64;
         for msg in rx {
-            let (idx, pbuf, sbuf, c) = msg?;
+            let (idx, bufs, c) = msg?;
             counts.add(c);
-            pending.insert(idx, (pbuf, sbuf));
-            while let Some((pbuf, sbuf)) = pending.remove(&expected) {
-                paired.write_all(&pbuf)?;
+            pending.insert(idx, bufs);
+            while let Some((p1, p2, sbuf)) = pending.remove(&expected) {
+                match &mut *paired {
+                    PairedSink::Interleaved(w) => w.write_all(&p1)?,
+                    PairedSink::Split(w1, w2) => {
+                        w1.write_all(&p1)?;
+                        w2.write_all(&p2)?;
+                    }
+                }
                 if !sbuf.is_empty() {
                     single.write_all(&sbuf)?;
                 }
