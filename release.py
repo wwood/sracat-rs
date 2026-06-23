@@ -205,7 +205,7 @@ def main() -> None:
     run(["git", "push", "origin", "HEAD", "--tags"])
 
     print()
-    print("Release commit and tag created, pushed to GitHub, and published to crates.io. Nothing to do?")
+    print("Release commit and tag created, pushed to GitHub, and published to crates.io. Next update the bioconda recipe and submit a PR to bioconda-recipes.")
 
 
 if __name__ == "__main__":
