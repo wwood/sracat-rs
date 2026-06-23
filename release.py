@@ -201,15 +201,11 @@ def main() -> None:
     run(["git", "commit", "-m", f"Release {tag}"])
     run(["git", "tag", tag])
 
+    run(["cargo", "publish"])
+    run(["git", "push", "origin", "HEAD", "--tags"])
+
     print()
-    print("Release commit and tag created.")
-    print("To trigger cargo-dist on GitHub, run:")
-    print()
-    print(f"  git push origin HEAD && git push origin {tag}")
-    print()
-    print("Or, equivalently:")
-    print()
-    print("  git push origin HEAD --tags")
+    print("Release commit and tag created, pushed to GitHub, and published to crates.io. Nothing to do?")
 
 
 if __name__ == "__main__":
