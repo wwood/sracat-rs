@@ -31,6 +31,42 @@ Benefits:
 - **Aligned-aware.** Aligned (cSRA) runs are extracted by default by reading the
   computed `READ` column; pass `--croak-on-aligned` to refuse them instead.
 
+## Install
+
+The most straightforward way to get a prebuilt binary is the [GitHub releases](https://github.com/wwood/sracat-rs/releases): the `cargo-dist`
+pipeline builds them statically in CI, and the shell installer there is the
+recommended way to install without building from source.
+
+You can also build from source using `cargo build --release` — but note that `sracat-rs` links against **ncbi-vdb**, a conda-provided C library, so it cannot
+be built from a bare checkout: `build.rs` needs `CONDA_PREFIX` to point at a pixi
+environment that supplies the ncbi-vdb headers and library. There is no fully
+standalone `cargo install` — the C dependency has to come from somewhere.
+
+The link mode is selected by the `SRACAT_VDB_LINK` environment variable:
+
+- **`dylib` (default)** — links `libncbi-vdb.so` and bakes `$CONDA_PREFIX/lib`
+  into the binary as an rpath. Fast to link and convenient for local dev, but the
+  binary then depends on that exact pixi env still existing on disk. This is what
+  `pixi run build` uses.
+- **`static`** — links `libncbi-vdb.a` instead. The binary carries no
+  `libncbi-vdb.so` dependency and **no conda-path rpath**, so it is
+  self-contained and relocatable. This is the right mode for anything you intend
+  to ship or move between machines.
+
+So to `cargo install` a clean, relocatable binary, do it from inside the pixi env
+(so `CONDA_PREFIX` is set) and ask for the static link:
+
+```sh
+# from a checkout
+pixi run -- env SRACAT_VDB_LINK=static cargo install --path .
+
+# or from crates.io
+pixi run -- env SRACAT_VDB_LINK=static cargo install sracat-rs
+```
+
+If you install with the default `dylib` mode, the resulting binary will contain
+an rpath pointing at your local pixi env and will break if that env is removed.
+
 ## Benchmarks
 
 `benchmarking/` holds a self-contained comparison of `sracat-rs` against
