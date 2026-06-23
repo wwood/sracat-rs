@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added LICENSE file with MIT license text to repo.
+
 ## Version 0.0.2
 
 ### Added
