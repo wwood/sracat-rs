@@ -1,9 +1,7 @@
 # sracat-rs
 
 A fast, deterministic reimplementation of `fasterq-dump` (the sra-tools
-extractor) with a focus on flexibly streaming outputs. It reads SRA directly through the
-**ncbi-vdb cursor C API** (via a small C shim), emitting reads in storage order so the output is byte-identical across
-runs. 
+extractor) with a focus on flexibly streaming outputs and avoiding the use of temporary files. 
 
 ## Examples
 
