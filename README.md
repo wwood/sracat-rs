@@ -5,6 +5,54 @@ extractor) with a focus on flexibly streaming outputs. It reads SRA directly thr
 **ncbi-vdb cursor C API** (via a small C shim), emitting reads in storage order so the output is byte-identical across
 runs. 
 
+## Examples
+
+`sracat-rs` reads one or more `.sra` files (or accessions) and writes reads in
+FASTA (default) or FASTQ (`--qual`). The key choice is **where the output goes**;
+the various output options let you shape it for the next tool without temp files.
+Paired reads (spots with two biological reads) are emitted interleaved (`/1`,
+`/2`) by default, while single/orphan reads are routed separately and never
+silently dropped.
+
+```sh
+# Stream interleaved paired reads to stdout (FASTA) — pipe straight into a mapper
+sracat-rs run.sra | head
+
+# FASTQ instead of FASTA (adds quality scores)
+sracat-rs --qual run.sra > reads.fastq
+
+# Split paired and single reads into prefixed files:
+#   out.paired.fasta  (interleaved pairs)
+#   out.single.fasta  (single/orphan reads)
+sracat-rs -o out run.sra
+
+# Split mates into separate read1 / read2 files (orphans -> their own file).
+# Here as FASTQ: -> r1.fastq, r2.fastq, singles.fastq
+sracat-rs -1 r1.fastq -2 r2.fastq --single-out singles.fastq --qual run.sra
+
+# Stream pairs to stdout but capture single/orphan reads in a file
+sracat-rs --single-out singles.fasta run.sra > pairs.fasta
+
+# Include technical reads (adapters/barcodes) that are dropped by default
+sracat-rs --include-technical -o out run.sra
+
+# Decode with 16 threads — output stays byte-identical to single-threaded
+sracat-rs --qual -t 16 -o out run.sra
+
+# Refuse aligned (cSRA) runs instead of extracting them
+sracat-rs --croak-on-aligned run.sra
+
+# Multiple runs are concatenated into the one output
+sracat-rs -o out a.sra b.sra c.sra
+```
+
+The output destinations are mutually constrained: `-o/--output-prefix` is its
+own mode (prefixed files), `-1`/`-2` split mates into two files (and require
+each other), and bare invocation streams pairs to stdout. In any mode where the
+run contains unpaired reads, give them a home with `--single-out` (or use `-o`,
+which provides one) or `sracat-rs` will error rather than drop them. See
+[Usage](#usage) for the full option reference.
+
 ## Why
 
 The original `sracat` uses the NGS C++ API (`ncbi::NGS::openReadCollection`),
@@ -33,14 +81,50 @@ Benefits:
 
 ## Install
 
-The most straightforward way to get a prebuilt binary is the [GitHub releases](https://github.com/wwood/sracat-rs/releases): the `cargo-dist`
-pipeline builds them statically in CI, and the shell installer there is the
-recommended way to install without building from source.
+### 1. From Bioconda (recommended)
 
-You can also build from source using `cargo build --release` — but note that `sracat-rs` links against **ncbi-vdb**, a conda-provided C library, so it cannot
+`sracat-rs` is packaged on [Bioconda](https://bioconda.github.io/), so the
+easiest install pulls the binary and its ncbi-vdb dependency together:
+
+```sh
+conda install -c bioconda -c conda-forge sracat-rs
+# or, faster:
+mamba install -c bioconda -c conda-forge sracat-rs
+# or with pixi, into a project/global env:
+pixi add sracat-rs
+```
+
+This is the recommended route for most users — no toolchain, no build step.
+
+### 2. Prebuilt binaries from the release page
+
+Each release ships statically-linked binaries built in CI by the
+[`cargo-dist`](https://opensource.axo.dev/cargo-dist/) pipeline. Grab them from
+the [GitHub releases](https://github.com/wwood/sracat-rs/releases) page, either
+by downloading an archive directly or via the shell installer published with the
+release:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+    https://github.com/wwood/sracat-rs/releases/latest/download/sracat-rs-installer.sh | sh
+```
+
+Because these binaries are statically linked against ncbi-vdb (see below), they
+are self-contained and relocatable — no conda environment required at runtime.
+
+### 3. From source inside the pixi environment
+
+`sracat-rs` links against **ncbi-vdb**, a conda-provided C library, so it cannot
 be built from a bare checkout: `build.rs` needs `CONDA_PREFIX` to point at a pixi
 environment that supplies the ncbi-vdb headers and library. There is no fully
-standalone `cargo install` — the C dependency has to come from somewhere.
+standalone `cargo install` — the C dependency has to come from somewhere. The
+pixi env in this repo provides everything (Rust toolchain, C compiler, ncbi-vdb):
+
+```sh
+pixi run build           # cargo build --release -> target/release/sracat-rs
+```
+
+#### Static vs. dynamic linking
 
 The link mode is selected by the `SRACAT_VDB_LINK` environment variable:
 
@@ -51,7 +135,7 @@ The link mode is selected by the `SRACAT_VDB_LINK` environment variable:
 - **`static`** — links `libncbi-vdb.a` instead. The binary carries no
   `libncbi-vdb.so` dependency and **no conda-path rpath**, so it is
   self-contained and relocatable. This is the right mode for anything you intend
-  to ship or move between machines.
+  to ship or move between machines (and is what the release binaries above use).
 
 So to `cargo install` a clean, relocatable binary, do it from inside the pixi env
 (so `CONDA_PREFIX` is set) and ask for the static link:
