@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+- `--accept-singles`: stream single/orphan reads to stdout interleaved with the
+  paired reads as one record-intact stream, instead of requiring a separate
+  destination for them.
+- `--expect-singles`: invert the default single-handling — stream single/orphan
+  reads to stdout and croak if any paired spot is encountered.
+
 ## Version 0.0.3
 
 ### Added

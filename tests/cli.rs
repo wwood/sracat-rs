@@ -456,3 +456,71 @@ fn single_end_with_single_out_succeeds() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+/// --accept-singles streams single/orphan reads to stdout (interleaved with any
+/// pairs) instead of demanding a separate destination. The fixture is single-end,
+/// so with the default this croaks; with --accept-singles the reads land on
+/// stdout.
+#[test]
+fn accept_singles_streams_singles_to_stdout() {
+    Assert::main_binary()
+        .with_args(&["--accept-singles", fixture().as_str()])
+        .succeeds()
+        .stdout()
+        .contains(">ERR015558.")
+        .unwrap();
+}
+
+/// --expect-singles mirrors the default: single/orphan reads go to stdout and a
+/// paired spot would croak. The fixture is entirely single-end, so it succeeds
+/// and the reads appear on stdout.
+#[test]
+fn expect_singles_streams_singles_to_stdout() {
+    Assert::main_binary()
+        .with_args(&["--expect-singles", fixture().as_str()])
+        .succeeds()
+        .stdout()
+        .contains(">ERR015558.")
+        .unwrap();
+}
+
+/// --accept-singles and --expect-singles are mutually exclusive.
+#[test]
+fn accept_and_expect_singles_conflict() {
+    Assert::main_binary()
+        .with_args(&["--accept-singles", "--expect-singles", fixture().as_str()])
+        .fails()
+        .unwrap();
+}
+
+/// --accept-singles routes singles through the interleaved paired stream, so the
+/// parallel writer path must run to completion (not deadlock) with -t > 1.
+#[test]
+fn accept_singles_parallel_does_not_block() {
+    let ok = run_within(30, &["-t", "4", "--accept-singles", fixture().as_str()]);
+    assert!(
+        ok,
+        "parallel --accept-singles run did not exit successfully"
+    );
+}
+
+/// The interleaved singles+pairs stdout stream must stay byte-identical across
+/// thread counts, like every other output mode.
+#[test]
+fn accept_singles_output_is_thread_stable() {
+    let out1 = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
+        .args(["--accept-singles", fixture().as_str()])
+        .output()
+        .expect("run --accept-singles at t1");
+    assert!(out1.status.success(), "t1 run failed");
+    let out4 = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
+        .args(["-t", "4", "--accept-singles", fixture().as_str()])
+        .output()
+        .expect("run --accept-singles at t4");
+    assert!(out4.status.success(), "t4 run failed");
+    assert!(!out1.stdout.is_empty(), "expected reads on stdout");
+    assert_eq!(
+        out1.stdout, out4.stdout,
+        "--accept-singles output must be byte-identical across thread counts"
+    );
+}

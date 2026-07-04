@@ -13,8 +13,19 @@ Paired reads (spots with two biological reads) are emitted interleaved (`/1`,
 silently dropped.
 
 ```sh
-# Stream interleaved paired reads to stdout (FASTA) — pipe straight into a mapper
+# Stream interleaved paired reads to stdout (FASTA) — pipe straight into a mapper.
+# NB: pairs only. If the run has any single/orphan reads this errors rather than
+# dropping them; use --accept-singles (below) to put every read on stdout, or
+# give the singles a home with --single-out / -o.
 sracat-rs run.sra | head
+
+# Stream *all* reads to stdout — pairs interleaved and singles inline, one intact
+# stream (FASTA). This is the way to get everything on stdout at once.
+sracat-rs --accept-singles run.sra | head
+
+# A single-end run: stream the single/orphan reads to stdout, and croak if any
+# paired spot turns up (the mirror image of the bare invocation).
+sracat-rs --expect-singles run.sra | head
 
 # FASTQ instead of FASTA (adds quality scores)
 sracat-rs --qual run.sra > reads.fastq
@@ -48,8 +59,19 @@ The output destinations are mutually constrained: `-o/--output-prefix` is its
 own mode (prefixed files), `-1`/`-2` split mates into two files (and require
 each other), and bare invocation streams pairs to stdout. In any mode where the
 run contains unpaired reads, give them a home with `--single-out` (or use `-o`,
-which provides one) or `sracat-rs` will error rather than drop them. See
-[Usage](#usage) for the full option reference.
+which provides one) or `sracat-rs` will error rather than drop them.
+
+Two flags reshape what goes to **stdout**:
+
+- `--accept-singles` puts *both* pairs and singles on stdout as one interleaved,
+  record-intact stream (in storage order) — no separate single destination
+  needed. Use this when the next tool should just receive every read.
+- `--expect-singles` inverts the default: it streams the single/orphan reads to
+  stdout and **croaks if a paired spot appears** (the default streams pairs and
+  croaks on a single). Handy for runs you expect to be single-end.
+
+Both stream to stdout, so they conflict with `-o`, `-1`/`-2`, and `--single-out`
+(and with each other). See [Usage](#usage) for the full option reference.
 
 ## Why
 
@@ -303,6 +325,8 @@ sracat-rs [OPTIONS] <SRA>...
 | `-1, --read1 <FILE>` | split pairs: write the forward read of each pair here (requires `-2`; mutually exclusive with `-o`) |
 | `-2, --read2 <FILE>` | split pairs: write the reverse read of each pair here (requires `-1`) |
 | `--single-out <FILE>` | when streaming/splitting pairs, send single/orphan reads here |
+| `--accept-singles` | stream single/orphan reads to stdout interleaved with the pairs, as one intact stream (conflicts with `-o`/`-1`/`-2`/`--single-out`) |
+| `--expect-singles` | invert the default: stream single/orphan reads to stdout and croak on any paired spot (conflicts with `-o`/`-1`/`-2`/`--single-out`/`--accept-singles`) |
 | `--qual` | write FASTQ (sequence + quality) instead of FASTA |
 | `--include-technical` | include technical reads (default: biological only) |
 | `--croak-on-aligned` | refuse aligned (cSRA) runs instead of extracting them (default: extract) |
@@ -314,10 +338,19 @@ Default behaviour streams interleaved **paired** reads to **stdout**. With
 `-2` (each read keeps its `/1`,`/2` suffix). In every mode, if the run contains
 any unpaired (single/orphan) reads and no destination for them is given,
 `sracat-rs` refuses rather than dropping them — pass `--single-out` or `-o`.
+`--accept-singles` instead folds those singles into the stdout stream (so every
+read goes to stdout), and `--expect-singles` flips the default to stream singles
+and croak on pairs.
 
 ```sh
 # stream interleaved pairs to stdout
 sracat-rs run.sra | head
+
+# stream ALL reads to stdout: pairs interleaved, singles inline (one stream)
+sracat-rs --accept-singles run.sra | head
+
+# stream singles to stdout; error out if any paired spot appears
+sracat-rs --expect-singles run.sra | head
 
 # split paired and single output into prefixed files
 sracat-rs -o out run.sra            # -> out.paired.fasta, out.single.fasta

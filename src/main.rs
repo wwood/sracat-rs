@@ -59,6 +59,25 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     single_out: Option<String>,
 
+    /// Stream single/orphan reads to stdout interleaved with the paired reads,
+    /// in storage order, instead of requiring a separate destination for them.
+    /// All reads (pairs and singles) are written through the one stdout stream,
+    /// so records stay intact.
+    #[arg(
+        long,
+        conflicts_with_all = ["output_prefix", "read1", "read2", "single_out", "expect_singles"]
+    )]
+    accept_singles: bool,
+
+    /// Invert the default single-handling: stream single/orphan reads to stdout
+    /// and croak if any paired spot is encountered. This mirrors the default
+    /// (which streams pairs to stdout and croaks on a single/orphan read).
+    #[arg(
+        long,
+        conflicts_with_all = ["output_prefix", "read1", "read2", "single_out", "accept_singles"]
+    )]
+    expect_singles: bool,
+
     /// Write FASTQ (with quality scores) instead of FASTA.
     #[arg(long)]
     qual: bool,
@@ -92,6 +111,11 @@ struct Opts {
     include_technical: bool,
     allow_aligned: bool,
     bench_read_only: bool,
+    /// --accept-singles: route single/orphan reads into the interleaved paired
+    /// stream (stdout) rather than the separate single destination.
+    singles_to_paired: bool,
+    /// --expect-singles: refuse any paired spot (only singles are wanted).
+    croak_on_paired: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -169,31 +193,35 @@ fn open_split_output(path: &str) -> io::Result<Box<dyn Write>> {
 /// only if a single read actually appears.
 struct SingleWriter {
     dest: SingleDest,
-    inner: Option<BufWriter<File>>,
+    inner: Option<BufWriter<Box<dyn Write>>>,
 }
 
 enum SingleDest {
     /// No destination configured: refuse if any single read is written.
     Fail,
     Path(PathBuf),
+    /// --expect-singles: single/orphan reads are the wanted output, streamed
+    /// to stdout.
+    Stdout,
 }
 
 impl SingleWriter {
-    fn ensure(&mut self) -> io::Result<&mut BufWriter<File>> {
+    fn ensure(&mut self) -> io::Result<&mut BufWriter<Box<dyn Write>>> {
         if self.inner.is_none() {
-            match &self.dest {
+            let w: Box<dyn Write> = match &self.dest {
                 SingleDest::Fail => {
                     return Err(io::Error::other(
                         "encountered unpaired read(s) but no destination for them; \
-                         pass --single-out <file> or -o <prefix>",
+                         pass --single-out <file>, -o <prefix>, or --accept-singles",
                     ))
                 }
-                SingleDest::Path(p) => {
-                    let f = File::create(p)
-                        .map_err(|e| io::Error::other(format!("creating {}: {e}", p.display())))?;
-                    self.inner = Some(BufWriter::with_capacity(1 << 20, f));
-                }
-            }
+                SingleDest::Path(p) => Box::new(
+                    File::create(p)
+                        .map_err(|e| io::Error::other(format!("creating {}: {e}", p.display())))?,
+                ),
+                SingleDest::Stdout => Box::new(io::stdout().lock()),
+            };
+            self.inner = Some(BufWriter::with_capacity(1 << 20, w));
         }
         Ok(self.inner.as_mut().unwrap())
     }
@@ -227,6 +255,8 @@ fn main() -> Result<()> {
         // into refusing them.
         allow_aligned: !cli.croak_on_aligned,
         bench_read_only: cli.bench_read_only,
+        singles_to_paired: cli.accept_singles,
+        croak_on_paired: cli.expect_singles,
     };
     let ext = if cli.qual { "fastq" } else { "fasta" };
 
@@ -250,15 +280,25 @@ fn main() -> Result<()> {
                     let f = File::create(&path).with_context(|| format!("creating {path}"))?;
                     BufWriter::with_capacity(1 << 20, Box::new(f) as Box<dyn Write>)
                 }
+                // --expect-singles streams singles to stdout and refuses pairs, so
+                // the paired sink is never written; discard into a sink rather than
+                // hold a second handle on stdout alongside the single writer.
+                None if cli.expect_singles => {
+                    BufWriter::with_capacity(1 << 20, Box::new(io::sink()) as Box<dyn Write>)
+                }
                 None => BufWriter::with_capacity(1 << 20, Box::new(io::stdout().lock())),
             });
         }
     }
     let mut single = SingleWriter {
-        dest: match (&cli.output_prefix, &cli.single_out) {
-            (Some(prefix), _) => SingleDest::Path(format!("{prefix}.single.{ext}").into()),
-            (None, Some(path)) => SingleDest::Path(path.into()),
-            (None, None) => SingleDest::Fail,
+        dest: match (&cli.output_prefix, &cli.single_out, cli.expect_singles) {
+            // --expect-singles: single/orphan reads are the wanted output.
+            (_, _, true) => SingleDest::Stdout,
+            (Some(prefix), _, _) => SingleDest::Path(format!("{prefix}.single.{ext}").into()),
+            (None, Some(path), _) => SingleDest::Path(path.into()),
+            // --accept-singles routes singles into the paired stream, so its
+            // Fail destination is never reached.
+            (None, None, _) => SingleDest::Fail,
         },
         inner: None,
     };
@@ -345,11 +385,31 @@ fn extract_range(
             1 => {
                 if !opts.bench_read_only {
                     let (o, l) = sel[0];
-                    write_read(single, name, row, None, &spot, o, l, &mut qbuf)?;
+                    // --accept-singles: interleave the single read into the paired
+                    // stdout stream (in row order) instead of the separate single
+                    // destination, so pairs and singles share one intact stream.
+                    if opts.singles_to_paired {
+                        match paired {
+                            PairedSink::Interleaved(w) => {
+                                write_read(&mut **w, name, row, None, &spot, o, l, &mut qbuf)?
+                            }
+                            PairedSink::Split(..) => unreachable!(
+                                "--accept-singles is incompatible with -1/-2 split output"
+                            ),
+                        }
+                    } else {
+                        write_read(single, name, row, None, &spot, o, l, &mut qbuf)?;
+                    }
                 }
                 counts.singles += 1;
             }
             2 => {
+                if opts.croak_on_paired {
+                    bail!(
+                        "{name}: spot {row} is a paired spot, but --expect-singles \
+                         was given (only single/orphan reads are permitted)"
+                    );
+                }
                 if !opts.bench_read_only {
                     let (o0, l0) = sel[0];
                     let (o1, l1) = sel[1];
