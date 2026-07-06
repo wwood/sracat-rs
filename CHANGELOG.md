@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## Version 0.1.0
+
 ### Added
 - `--accept-singles`: stream single/orphan reads to stdout interleaved with the
   paired reads as one record-intact stream, instead of requiring a separate
