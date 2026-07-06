@@ -26,3 +26,4 @@
 /benchmarks/
 /.snakemake/
 bench_big.txt
+singles_argument_testing/
