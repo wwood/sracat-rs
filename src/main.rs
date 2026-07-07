@@ -56,7 +56,7 @@ struct Cli {
 
     /// Write single/orphan reads to this file (when pairs are streamed to stdout
     /// or split via -1/-2).
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, visible_alias = "single", value_name = "FILE")]
     single_out: Option<String>,
 
     /// Stream single/orphan reads to stdout interleaved with the paired reads,
