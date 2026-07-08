@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 
 mod ffi;
 use ffi::Run;
@@ -33,7 +34,7 @@ struct Cli {
 
     /// Split paired output: write the forward read of each pair to this file
     /// (requires -2). Mates are not interleaved. Single/orphan reads still go to
-    /// --single-out (or -o), or the run croaks if neither is given.
+    /// --single (or -o), or the run croaks if neither is given.
     #[arg(
         short = '1',
         long = "read1",
@@ -56,7 +57,7 @@ struct Cli {
 
     /// Write single/orphan reads to this file (when pairs are streamed to stdout
     /// or split via -1/-2).
-    #[arg(long, visible_alias = "single", value_name = "FILE")]
+    #[arg(long = "single", alias = "single-out", value_name = "FILE")]
     single_out: Option<String>,
 
     /// Stream single/orphan reads to stdout interleaved with the paired reads,
@@ -99,6 +100,10 @@ struct Cli {
     /// repeatable; no temp files).
     #[arg(short = 't', long, default_value_t = 1)]
     threads: usize,
+
+    /// Show a per-input progress bar (spots processed) on stderr.
+    #[arg(long)]
+    progress: bool,
 
     /// (benchmark) read + classify spots but skip all formatting/output.
     #[arg(long, hide = true)]
@@ -148,6 +153,12 @@ impl PairedSink<'_> {
     }
 }
 
+/// Write-buffer size for FIFO outputs. Kept well under the enlarged 1 MiB pipe
+/// capacity so a single writer keeps split R1/R2 pipes finely interleaved (see
+/// `open_split_output`); large enough that per-field record writes coalesce into
+/// a handful of `write()` syscalls per record instead of one syscall per field.
+const FIFO_WRITE_BUF: usize = 64 << 10;
+
 #[cfg(unix)]
 fn open_split_output(path: &str) -> io::Result<Box<dyn Write>> {
     use std::os::unix::fs::FileTypeExt;
@@ -162,7 +173,18 @@ fn open_split_output(path: &str) -> io::Result<Box<dyn Write>> {
             // catches up.
             let f = OpenOptions::new().read(true).write(true).open(path)?;
             enlarge_pipe_buffer(&f);
-            Ok(Box::new(f) as Box<dyn Write>)
+            // Buffer FIFO writes: the single-threaded extractor emits each record
+            // field-by-field, so an unbuffered FIFO turns every field into a tiny
+            // write() syscall (~16 bytes each). That pins a core spinning in the
+            // kernel and starves the reader into per-record blocking reads,
+            // collapsing pipeline throughput (e.g. a 9 s sketch stretches past
+            // 100 s). The buffer must stay well below the pipe capacity (enlarged
+            // to 1 MiB above): with a split R1/R2 run, a single writer thread
+            // flushes the two pipes in turn, so a flush as large as the pipe can
+            // fill R1 completely while R2 is still buffered, deadlocking a reader
+            // that needs R2 to advance. A small buffer keeps R1/R2 finely
+            // interleaved so neither pipe fills while the other sits unflushed.
+            Ok(Box::new(BufWriter::with_capacity(FIFO_WRITE_BUF, f)) as Box<dyn Write>)
         }
         _ => File::create(path)
             .map(|f| Box::new(BufWriter::with_capacity(1 << 20, f)) as Box<dyn Write>),
@@ -212,7 +234,7 @@ impl SingleWriter {
                 SingleDest::Fail => {
                     return Err(io::Error::other(
                         "encountered unpaired read(s) but no destination for them; \
-                         pass --single-out <file>, -o <prefix>, or --accept-singles",
+                         pass --single <file>, -o <prefix>, or --accept-singles",
                     ))
                 }
                 SingleDest::Path(p) => Box::new(
@@ -325,13 +347,36 @@ fn main() -> Result<()> {
                     "note: {name} is aligned (cSRA); extracting single-threaded (-t{threads} ignored)"
                 );
             }
+            // Per-input progress bar (created after the note above so it doesn't
+            // clobber that line). Workers increment it as they classify spots.
+            let pb = cli.progress.then(|| make_progress(&name, run.row_count()));
             let c = if eff_threads == 1 {
                 let (lo, hi) = (run.first_row(), run.first_row() + run.row_count() as i64);
-                extract_range(&run, lo, hi, &name, &mut paired, &mut single, opts)?
+                extract_range(
+                    &run,
+                    lo,
+                    hi,
+                    &name,
+                    &mut paired,
+                    &mut single,
+                    opts,
+                    pb.as_ref(),
+                )?
             } else {
                 drop(run); // workers open their own cursors in extract_parallel
-                extract_parallel(input, &name, eff_threads, &mut paired, &mut single, opts)?
+                extract_parallel(
+                    input,
+                    &name,
+                    eff_threads,
+                    &mut paired,
+                    &mut single,
+                    opts,
+                    pb.as_ref(),
+                )?
             };
+            if let Some(pb) = pb {
+                pb.finish();
+            }
             totals.add(c);
         }
     }
@@ -352,8 +397,26 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Build a per-input progress bar over `total` spots, labelled with the run
+/// name and rendered on stderr.
+fn make_progress(name: &str, total: u64) -> ProgressBar {
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg}: [{bar:40.cyan/blue}] {human_pos}/{human_len} spots ({percent}%) {per_sec} ETA {eta}",
+        )
+        .expect("static progress template")
+        .progress_chars("=>-"),
+    );
+    pb.set_message(name.to_string());
+    pb
+}
+
 /// Extract rows `[lo, hi)` of an opened run, writing paired reads to `paired`
-/// (interleaved or split) and single reads to `single`.
+/// (interleaved or split) and single reads to `single`. When `progress` is set,
+/// the bar is advanced once per spot; increments are batched to keep the atomic
+/// traffic low and are safe to call concurrently from parallel workers.
+#[allow(clippy::too_many_arguments)]
 fn extract_range(
     run: &Run,
     lo: i64,
@@ -362,10 +425,14 @@ fn extract_range(
     paired: &mut PairedSink<'_>,
     single: &mut dyn Write,
     opts: Opts,
+    progress: Option<&ProgressBar>,
 ) -> Result<Counts> {
     let mut counts = Counts::default();
     let mut sel: Vec<(usize, usize)> = Vec::new();
     let mut qbuf: Vec<u8> = Vec::new();
+    // Batch progress ticks so a huge run isn't a storm of atomic increments.
+    const TICK: u64 = 4096;
+    let mut since_tick = 0u64;
 
     for row in lo..hi {
         let spot = run.read_spot(row)?;
@@ -431,6 +498,16 @@ fn extract_range(
                  (use --include-technical to inspect, or file an issue)"
             ),
         }
+        if let Some(pb) = progress {
+            since_tick += 1;
+            if since_tick >= TICK {
+                pb.inc(since_tick);
+                since_tick = 0;
+            }
+        }
+    }
+    if let Some(pb) = progress {
+        pb.inc(since_tick);
     }
     Ok(counts)
 }
@@ -447,6 +524,7 @@ fn extract_parallel(
     paired: &mut PairedSink<'_>,
     single: &mut dyn Write,
     opts: Opts,
+    progress: Option<&ProgressBar>,
 ) -> Result<Counts> {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -510,7 +588,7 @@ fn extract_parallel(
                         } else {
                             PairedSink::Interleaved(&mut p1)
                         };
-                        extract_range(&run, lo, chi, name, &mut ps, &mut sbuf, opts)
+                        extract_range(&run, lo, chi, name, &mut ps, &mut sbuf, opts, progress)
                     };
                     let msg = res.map(|c| (idx, (p1, p2, sbuf), c));
                     let failed = msg.is_err();
@@ -533,10 +611,7 @@ fn extract_parallel(
             while let Some((p1, p2, sbuf)) = pending.remove(&expected) {
                 match &mut *paired {
                     PairedSink::Interleaved(w) => w.write_all(&p1)?,
-                    PairedSink::Split(w1, w2) => {
-                        w1.write_all(&p1)?;
-                        w2.write_all(&p2)?;
-                    }
+                    PairedSink::Split(w1, w2) => write_split_interleaved(*w1, *w2, &p1, &p2)?,
                 }
                 if !sbuf.is_empty() {
                     single.write_all(&sbuf)?;
@@ -547,6 +622,39 @@ fn extract_parallel(
         }
         Ok(counts)
     })
+}
+
+/// Write a decoded chunk's forward (`p1`) and reverse (`p2`) buffers to the two
+/// split (`-1`/`-2`) outputs, interleaved in small blocks. The parallel writer
+/// is a single thread feeding both streams; when the outputs are FIFOs, writing
+/// a whole multi-megabyte chunk to `w1` before `w2` fills (and then blocks on)
+/// the R1 pipe while the R2 pipe stays empty, deadlocking a reader that consumes
+/// mates in lockstep. `write_all` of a slice larger than the FIFO's `BufWriter`
+/// bypasses that buffer, so the buffer alone does not prevent it. Interleaving
+/// bounds the R1/R2 skew to `BLK`, which stays well under the enlarged pipe
+/// capacity. For regular files this is simply two buffered writers filling in
+/// step, at no meaningful cost.
+fn write_split_interleaved(
+    w1: &mut dyn Write,
+    w2: &mut dyn Write,
+    p1: &[u8],
+    p2: &[u8],
+) -> io::Result<()> {
+    const BLK: usize = 32 << 10;
+    let (mut a, mut b) = (p1, p2);
+    while !a.is_empty() || !b.is_empty() {
+        if !a.is_empty() {
+            let n = a.len().min(BLK);
+            w1.write_all(&a[..n])?;
+            a = &a[n..];
+        }
+        if !b.is_empty() {
+            let n = b.len().min(BLK);
+            w2.write_all(&b[..n])?;
+            b = &b[n..];
+        }
+    }
+    Ok(())
 }
 
 /// Write one read as FASTA or FASTQ. `(off, len)` selects the read within the

@@ -43,7 +43,7 @@ fn help_succeeds() {
         .with_args(&["--help"])
         .succeeds()
         .stdout()
-        .contains("--single-out")
+        .contains("--single")
         .unwrap();
 }
 
