@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- `--progress`: show progress bar for reads processed, with estimated time remaining.
+
+### Fixed
+- Performance improvements for reading and writing FIFO streams, which previously were doing too many syscalls.
+
 ## Version 0.1.0
 
 ### Added
