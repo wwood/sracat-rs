@@ -25,7 +25,11 @@ snakemake = ">=9.23.1,<10"
 [feature.dev.tasks]
 fetch-testdata = "snakemake --cores 1"
 test = { cmd = "cargo test", depends-on = ["fetch-testdata"] }
-big_benchmark = { cmd = "mqsub --seg -t 8 -m 16 --hours 6 -- pixi run --manifest-path benchmarking/pixi.toml bench", depends-on = ["fetch-testdata"] }
+# Submit the benchmark sweep to the queue. Fetch the inputs first with
+# `pixi run -e download download` (benchmarking/Snakefile) — they are large SRA
+# runs downloaded via kingfisher into benchmarking/data, kept out of this task
+# because that env needs a newer ncbi-vdb that conflicts with the default.
+big_benchmark = { cmd = "mqsub --seg -t 8 -m 16 --hours 6 -- pixi run --manifest-path benchmarking/pixi.toml bench" }
 
 [environments]
 dev = ["dev"]
