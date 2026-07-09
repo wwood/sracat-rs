@@ -7,9 +7,20 @@
 #include <klib/namelist.h>
 #include <klib/rc.h>
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ncbi-vdb's VDBManager/schema/config are process-global, reference-counted
+ * singletons. Opening and closing runs from many worker threads at once (each
+ * worker owns its own cursor, but they all call VDBManagerMakeRead / *Release
+ * and touch the shared schema during setup/teardown) races on that shared
+ * state and corrupts the heap ("double free or corruption"), non-deterministic
+ * and only under -t >1. Per-cursor cell reads (sracat_read_spot) are safe to
+ * run concurrently, so serialize *only* the open/close lifecycle: the cost is a
+ * handful of serialized opens at startup, negligible against decoding the run. */
+static pthread_mutex_t g_vdb_lifecycle = PTHREAD_MUTEX_INITIALIZER;
 
 struct SracatRun {
     const VDBManager *mgr;
@@ -32,6 +43,22 @@ static void seterr(char *errbuf, size_t errlen, const char *msg) {
     }
 }
 
+/* Release everything held by `run` and free it. Caller must hold
+ * g_vdb_lifecycle (VDBManagerRelease etc. touch the shared singletons). */
+static void close_run(SracatRun *run) {
+    if (run == NULL)
+        return;
+    if (run->curs != NULL)
+        VCursorRelease(run->curs);
+    if (run->tbl != NULL)
+        VTableRelease(run->tbl);
+    if (run->db != NULL)
+        VDatabaseRelease(run->db);
+    if (run->mgr != NULL)
+        VDBManagerRelease(run->mgr);
+    free(run);
+}
+
 int sracat_open(const char *path, int with_quality, int allow_aligned,
                 SracatRun **out, char *errbuf, size_t errlen) {
     *out = NULL;
@@ -41,6 +68,9 @@ int sracat_open(const char *path, int with_quality, int allow_aligned,
         return 1;
     }
     r->has_qual = with_quality;
+
+    /* Serialize the whole open against other opens/closes: see g_vdb_lifecycle. */
+    pthread_mutex_lock(&g_vdb_lifecycle);
 
     if (VDBManagerMakeRead(&r->mgr, NULL) != 0) {
         seterr(errbuf, errlen, "VDBManagerMakeRead failed");
@@ -112,10 +142,12 @@ int sracat_open(const char *path, int with_quality, int allow_aligned,
     }
 
     *out = r;
+    pthread_mutex_unlock(&g_vdb_lifecycle);
     return 0;
 
 fail:
-    sracat_close(r);
+    close_run(r);
+    pthread_mutex_unlock(&g_vdb_lifecycle);
     return 1;
 }
 
@@ -191,13 +223,7 @@ int sracat_read_spot(const SracatRun *run, int64_t row,
 void sracat_close(SracatRun *run) {
     if (run == NULL)
         return;
-    if (run->curs != NULL)
-        VCursorRelease(run->curs);
-    if (run->tbl != NULL)
-        VTableRelease(run->tbl);
-    if (run->db != NULL)
-        VDatabaseRelease(run->db);
-    if (run->mgr != NULL)
-        VDBManagerRelease(run->mgr);
-    free(run);
+    pthread_mutex_lock(&g_vdb_lifecycle);
+    close_run(run);
+    pthread_mutex_unlock(&g_vdb_lifecycle);
 }

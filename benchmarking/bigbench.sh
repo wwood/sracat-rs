@@ -8,14 +8,18 @@
 # shared-filesystem IO is not the bottleneck (and removed before the next one),
 # so size $TMP / memory accordingly:
 #
-#   mqsub --no-email -t 16 -m 96 --hours 2 -- \
-#     pixi run --manifest-path benchmarking/pixi.toml bench
+#   ~/git/sracat-rs$ pixi run -e dev big_benchmark
 #
 # Each tool is timed REPS times (default 4); the first run is a warm-up that the
 # plot discards. Writes a machine-readable results.tsv (file, tool, threads, rep,
 # seconds, reads, rc) plus a human-readable log to bench_big.txt. Render with
 # `pixi run plot` (bars = mean, error bars = stdev over the kept reps).
 set -uo pipefail
+
+# A crashing tool (e.g. a SIGABRT from a heap error) should fail fast, not stall
+# the whole benchmark for hours while the kernel pipes a full core dump to
+# systemd-coredump. Suppress core dumps so an abort terminates immediately.
+ulimit -c 0
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$HERE")"
@@ -29,7 +33,7 @@ DATA="${DATA:-$HERE/data}"
 BIG="${BIG:-$DATA/SRR24704796/SRR24704796.sra}"     # unaligned, ~2.7 GB
 MED="${MED:-$DATA/ERR12726217/ERR12726217.sra}"     # unaligned, ~0.6 GB
 CSRA="${CSRA:-$DATA/ERR1540848/ERR1540848.sra}"     # aligned cSRA, ~9 MB
-T="${T:-16}"        # multi-thread count (each tool is also run at 1 thread)
+T="${T:-8}"        # multi-thread count (each tool is also run at 1 thread)
 TIMEOUT="${TIMEOUT:-600}"   # per-command wall limit (s); guards against hangs
 REPS="${REPS:-4}"   # runs per tool; the first (rep 1) is a warm-up, dropped in analysis
 
