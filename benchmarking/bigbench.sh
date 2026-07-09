@@ -33,7 +33,7 @@ DATA="${DATA:-$HERE/data}"
 BIG="${BIG:-$DATA/SRR24704796/SRR24704796.sra}"     # unaligned, ~2.7 GB
 MED="${MED:-$DATA/ERR12726217/ERR12726217.sra}"     # unaligned, ~0.6 GB
 CSRA="${CSRA:-$DATA/ERR1540848/ERR1540848.sra}"     # aligned cSRA, ~9 MB
-T="${T:-8}"        # multi-thread count (each tool is also run at 1 thread)
+T="${T:-16}"        # multi-thread count (each tool is also run at 1 thread)
 TIMEOUT="${TIMEOUT:-600}"   # per-command wall limit (s); guards against hangs
 REPS="${REPS:-4}"   # runs per tool; the first (rep 1) is a warm-up, dropped in analysis
 
