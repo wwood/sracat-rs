@@ -25,6 +25,7 @@ snakemake = ">=9.23.1,<10"
 [feature.dev.tasks]
 fetch-testdata = "snakemake --cores 1"
 test = { cmd = "cargo test", depends-on = ["fetch-testdata"] }
+big_benchmark = { cmd = "mqsub --seg -t 8 -m 16 --hours 6 -- pixi run --manifest-path benchmarking/pixi.toml bench", depends-on = ["fetch-testdata"] }
 
 [environments]
 dev = ["dev"]
