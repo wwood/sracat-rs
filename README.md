@@ -17,42 +17,46 @@ silently dropped.
 # NB: pairs only. If the run has any single/orphan reads this errors rather than
 # dropping them; use --accept-singles (below) to put every read on stdout, or
 # give the singles a home with --single-out / -o.
-sracat-rs run.sra | head
+$ sracat-rs run.sra | head
+
+# Stream with a progress bar
+$ sracat-rs --progress ~/n/ERR15372791.sra >reads.fasta
+ERR15372791: [=====>----------------------------------] 983,040/7,744,170 spots (13%) 744,052.4378/s ETA 9s
 
 # Stream *all* reads to stdout — pairs interleaved and singles inline, one intact
 # stream (FASTA). This is the way to get everything on stdout at once.
-sracat-rs --accept-singles run.sra | head
+$ sracat-rs --accept-singles run.sra | head
 
 # A single-end run: stream the single/orphan reads to stdout, and croak if any
 # paired spot turns up (the mirror image of the bare invocation).
-sracat-rs --expect-singles run.sra | head
+$ sracat-rs --expect-singles run.sra | head
 
 # FASTQ instead of FASTA (adds quality scores)
-sracat-rs --qual run.sra > reads.fastq
+$ sracat-rs --qual run.sra > reads.fastq
 
 # Split paired and single reads into prefixed files:
 #   out.paired.fasta  (interleaved pairs)
 #   out.single.fasta  (single/orphan reads)
-sracat-rs -o out run.sra
+$ sracat-rs -o out run.sra
 
 # Split mates into separate read1 / read2 files (orphans -> their own file).
 # Here as FASTQ: -> r1.fastq, r2.fastq, singles.fastq
-sracat-rs -1 r1.fastq -2 r2.fastq --single-out singles.fastq --qual run.sra
+$ sracat-rs -1 r1.fastq -2 r2.fastq --single-out singles.fastq --qual run.sra
 
 # Stream pairs to stdout but capture single/orphan reads in a file
-sracat-rs --single-out singles.fasta run.sra > pairs.fasta
+$ sracat-rs --single-out singles.fasta run.sra > pairs.fasta
 
 # Include technical reads (adapters/barcodes) that are dropped by default
-sracat-rs --include-technical -o out run.sra
+$ sracat-rs --include-technical -o out run.sra
 
 # Decode with 16 threads — output stays byte-identical to single-threaded
-sracat-rs --qual -t 16 -o out run.sra
+$ sracat-rs --qual -t 16 -o out run.sra
 
 # Refuse aligned (cSRA) runs instead of extracting them
-sracat-rs --croak-on-aligned run.sra
+$ sracat-rs --croak-on-aligned run.sra
 
 # Multiple runs are concatenated into the one output
-sracat-rs -o out a.sra b.sra c.sra
+$ sracat-rs -o out a.sra b.sra c.sra
 ```
 
 The output destinations are mutually constrained: `-o/--output-prefix` is its
