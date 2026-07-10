@@ -60,6 +60,16 @@ struct Cli {
     #[arg(long = "single", alias = "single-out", value_name = "FILE")]
     single_out: Option<String>,
 
+    /// Open the single/orphan output (--single, or -o's *.single) up front instead
+    /// of lazily on the first orphan read. By default the sink is opened only when
+    /// an orphan actually appears, so a cleanly-paired run leaves no empty file --
+    /// but when the destination is a FIFO/named pipe, that lazy open means the pipe
+    /// never gets a writer for a run with no orphans, and a reader blocking on
+    /// open(O_RDONLY) hangs forever waiting for a partner. Pass this when streaming
+    /// singles through a FIFO so the reader always gets a clean EOF.
+    #[arg(long)]
+    eager_open_output: bool,
+
     /// Stream single/orphan reads to stdout interleaved with the paired reads,
     /// in storage order, instead of requiring a separate destination for them.
     /// All reads (pairs and singles) are written through the one stdout stream,
@@ -324,6 +334,19 @@ fn main() -> Result<()> {
         },
         inner: None,
     };
+
+    // --eager-open-output: open the single sink now rather than on the first orphan.
+    // For a FIFO destination this guarantees the pipe gets a writer even when the run
+    // has no orphans, so a consumer reading the pipe sees a clean EOF instead of
+    // blocking forever on open(O_RDONLY). A Fail/Stdout destination has nothing to
+    // pre-open (Fail must stay lazy so it only errors on a real orphan).
+    if cli.eager_open_output {
+        if let SingleDest::Path(_) = single.dest {
+            single
+                .ensure()
+                .context("eagerly opening the single/orphan output")?;
+        }
+    }
 
     let threads = cli.threads.max(1);
     let mut totals = Counts::default();
