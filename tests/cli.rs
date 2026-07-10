@@ -457,6 +457,128 @@ fn single_end_with_single_out_succeeds() {
     let _ = std::fs::remove_file(&out);
 }
 
+/// The single/orphan sink is opened lazily, so a cleanly-paired run with zero orphans
+/// leaves no file. --eager-open-output opens it up front instead, so it exists (empty)
+/// even with no orphans. Uses the paired DRR033172 fixture (46,282 pairs, 0 orphans);
+/// skips if absent.
+#[test]
+fn eager_open_output_creates_empty_single_file() {
+    let f = format!(
+        "{}/tests/data/DRR033172/DRR033172.sra",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&f).exists() {
+        eprintln!(
+            "skipping eager_open_output_creates_empty_single_file: {f} not present (run: pixi run fetch-testdata)"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let lazy = format!("{}/sracat_rs_lazy_single_{pid}.fasta", dir.display());
+    let eager = format!("{}/sracat_rs_eager_single_{pid}.fasta", dir.display());
+    for p in [&lazy, &eager] {
+        let _ = std::fs::remove_file(p);
+    }
+
+    // Default (lazy): a zero-orphan run never opens the sink, so no file is created.
+    Assert::main_binary()
+        .with_args(&["--single", lazy.as_str(), f.as_str()])
+        .succeeds()
+        .unwrap();
+    assert!(
+        !std::path::Path::new(&lazy).exists(),
+        "lazy single sink must not be created for a zero-orphan run"
+    );
+
+    // --eager-open-output: the sink is opened at startup, so it exists but is empty.
+    Assert::main_binary()
+        .with_args(&[
+            "--eager-open-output",
+            "--single",
+            eager.as_str(),
+            f.as_str(),
+        ])
+        .succeeds()
+        .unwrap();
+    let meta = std::fs::metadata(&eager).expect("eager single sink must be created up front");
+    assert_eq!(
+        meta.len(),
+        0,
+        "a zero-orphan run must leave the eager single sink empty"
+    );
+
+    for p in [&lazy, &eager] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Regression for the streaming hang: when the single/orphan sink is a FIFO and the run
+/// has zero orphans, the lazy open never happens so the pipe never gets a writer, and a
+/// consumer blocking on open(O_RDONLY) hangs forever. --eager-open-output opens the pipe
+/// up front, so the consumer instead sees a clean EOF. Timeout-guarded so a regression
+/// fails the test rather than blocking forever.
+#[cfg(unix)]
+#[test]
+fn eager_open_output_single_fifo_gets_clean_eof() {
+    use std::io::Read;
+
+    let f = format!(
+        "{}/tests/data/DRR033172/DRR033172.sra",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&f).exists() {
+        eprintln!(
+            "skipping eager_open_output_single_fifo_gets_clean_eof: {f} not present (run: pixi run fetch-testdata)"
+        );
+        return;
+    }
+
+    let dir = std::env::temp_dir();
+    let tag = format!("{}_{}", std::process::id(), unique_nanos());
+    let s = format!("{}/sracat_rs_eager_fifo_{tag}", dir.display());
+    let status = Command::new("mkfifo").arg(&s).status().expect("run mkfifo");
+    assert!(status.success(), "mkfifo failed for {s}");
+
+    // Pairs go to /dev/null; singles stream through the FIFO. Eager-open makes sracat
+    // open the FIFO at startup (blocking until the reader below connects).
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
+        .args(["--eager-open-output", "--single", &s, f.as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sracat-rs");
+
+    let s_reader = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            let mut file = std::fs::File::open(&s).expect("open single fifo");
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).expect("drain single fifo");
+            data.len()
+        })
+    };
+
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("sracat-rs blocked streaming singles through a FIFO with --eager-open-output");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "sracat-rs did not exit successfully");
+
+    let n = s_reader.join().expect("join single fifo reader");
+    assert_eq!(n, 0, "a zero-orphan run must stream an empty singles pipe");
+
+    let _ = std::fs::remove_file(&s);
+}
+
 /// --accept-singles streams single/orphan reads to stdout (interleaved with any
 /// pairs) instead of demanding a separate destination. The fixture is single-end,
 /// so with the default this croaks; with --accept-singles the reads land on
