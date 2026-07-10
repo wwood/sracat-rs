@@ -4,6 +4,11 @@
 
 ### Added
 - `--progress`: show progress bar for reads processed, with estimated time remaining.
+- `--eager-open-output`: open the single/orphan output up front instead of lazily
+  on the first orphan read. When singles are streamed through a FIFO, the default
+  lazy open means the pipe never gets a writer for a run with no orphans, so a
+  reader blocking on `open(O_RDONLY)` hangs forever; this flag guarantees the
+  reader sees a clean EOF.
 
 ### Fixed
 - Performance improvements for reading and writing FIFO streams, which previously were doing too many syscalls.
