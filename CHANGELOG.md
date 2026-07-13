@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## Version 0.2.0
+
 ### Added
 - `--progress`: show progress bar for reads processed, with estimated time remaining.
 - `--eager-open-output`: open the single/orphan output up front instead of lazily
