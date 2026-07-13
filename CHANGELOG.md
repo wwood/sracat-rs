@@ -12,6 +12,9 @@
 
 ### Fixed
 - Performance improvements for reading and writing FIFO streams, which previously were doing too many syscalls.
+- Intermittent crash ("double free or corruption") under `-t` > 1, caused by
+  unserialized concurrent open/close of the ncbi-vdb manager; the open/close
+  lifecycle is now serialized while the hot read path stays lock-free.
 
 ## Version 0.1.0
 
