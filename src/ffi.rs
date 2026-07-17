@@ -118,7 +118,26 @@ impl Run {
             )
         };
         if rc != 0 {
-            bail!("row {row}: {}", errstr(&err));
+            let msg = errstr(&err);
+            // Reading the (computed) READ column commonly fails when ncbi-vdb
+            // cannot resolve its configuration/repository — e.g. reconstructing
+            // READ for an aligned (cSRA) run needs the reference sequences, which
+            // ncbi-vdb fetches according to its vdb-config. Point the user at the
+            // most likely cause rather than surfacing the bare shim message.
+            if msg.contains("reading READ failed") {
+                bail!(
+                    "row {row}: {msg}\n\
+                     This often means ncbi-vdb is not configured correctly. Reading the \
+                     READ column (for aligned/cSRA runs this reconstructs bases from the \
+                     reference) requires a working vdb-config. Try:\n  \
+                     - run `vdb-config --interactive` (or `vdb-config --restore-defaults`) \
+                     to initialise the configuration,\n  \
+                     - ensure remote access is enabled so reference sequences can be \
+                     resolved, and check that $NCBI_SETTINGS / ~/.ncbi/user-settings.mkfg \
+                     is readable."
+                );
+            }
+            bail!("row {row}: {msg}");
         }
         // SAFETY: on success the shim guarantees the pointers are non-null and
         // valid for the given lengths until the next cursor access.
