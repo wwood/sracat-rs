@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## Version 0.2.1
+
 ### Fixed
 - Intermittent segfault at process exit on aligned (cSRA) runs whose reference
   sequences were resolved over the network: ncbi-vdb's atexit teardown of its
