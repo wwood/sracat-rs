@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed
+- Intermittent segfault at process exit on aligned (cSRA) runs whose reference
+  sequences were resolved over the network: ncbi-vdb's atexit teardown of its
+  process-global manager and network/refseq caches could crash after all reads
+  had already been emitted. Now that all output is flushed, exit straight to the
+  kernel via `_exit(2)`, skipping the crash-prone teardown.
+
 ## Version 0.2.0
 
 ### Added
