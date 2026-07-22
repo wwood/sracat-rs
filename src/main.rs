@@ -278,7 +278,28 @@ impl Write for SingleWriter {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    let code = match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            1
+        }
+    };
+    // ncbi-vdb tears down process-global singletons (the VDBManager, and the
+    // network/refseq caches behind it) from libc atexit handlers on a normal
+    // exit. For aligned (cSRA) runs whose reference sequences were resolved over
+    // the network that teardown has been observed to segfault at the very end,
+    // after all reads were already emitted. `run()` has flushed every output by
+    // the time it returns, and the process is about to die anyway, so skip the
+    // crash-prone teardown by going straight to the exit(2) syscall.
+    let _ = io::stderr().flush();
+    // SAFETY: _exit just makes the exit(2) syscall and never returns; it runs no
+    // destructors or atexit handlers, which is exactly what we want here.
+    unsafe { libc::_exit(code) }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     let opts = Opts {
         qual: cli.qual,
