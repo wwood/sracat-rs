@@ -115,8 +115,8 @@ struct Cli {
     /// run. Because the ncbi-vdb cursor is random-access, only the sampled rows
     /// are read (cost is O(N), not O(run size)), so this is fast even on huge
     /// runs. Each sampled spot yields its reads: a single-end spot emits one
-    /// read (so N spots == N reads), a paired spot emits both mates. Output is
-    /// in storage order (the sampled rows are sorted), and the sample is
+    /// read (so N spots == N reads), a paired spot emits both mates. The sampled
+    /// reads are emitted in random order (not sorted by row), and the sample is
     /// reproducible for a given --seed.
     #[arg(long, value_name = "N")]
     sample: Option<u64>,
@@ -544,11 +544,11 @@ fn extract_range(
     Ok(counts)
 }
 
-/// Extract a specific, arbitrary set of rows (as chosen by `--sample`). Unlike
-/// `extract_range` this does not scan a contiguous span: it reads only the given
-/// rows, seeking directly into each via the cursor (the ncbi-vdb cell API is
-/// random-access, so an n-row sample costs O(n), not O(run size)). `rows` is
-/// expected to be sorted ascending so output stays in storage order.
+/// Extract a specific, arbitrary set of rows (as chosen by `--sample`), in the
+/// given order. Unlike `extract_range` this does not scan a contiguous span: it
+/// reads only the listed rows, seeking directly into each via the cursor (the
+/// ncbi-vdb cell API is random-access, so an n-row sample costs O(n), not O(run
+/// size)). Reads are emitted in `rows` order, which `sample_rows` shuffles.
 fn extract_sample(
     run: &Run,
     rows: &[i64],
@@ -694,10 +694,13 @@ impl SplitMix64 {
 }
 
 /// Choose `k` distinct rows uniformly at random from the run's `[first,
-/// first+count)` id range, returned sorted ascending so the extracted sample
-/// stays in storage order. Uses Floyd's algorithm: O(k) time and memory,
-/// independent of `count`, so it scales to billion-row runs. If `k >= count`
-/// every row is returned (the whole run, in order).
+/// first+count)` id range, returned in random order (a subsample should not
+/// carry the run's positional structure, so it is emitted shuffled, not row
+/// sorted). Uses Floyd's algorithm to pick the subset in O(k) time and memory
+/// independent of `count` (so it scales to billion-row runs), then a Fisher-Yates
+/// shuffle for the order. Both draw from a seeded PRNG, so a given `seed`
+/// reproduces the same rows in the same order. If `k >= count` the whole run is
+/// returned in storage order (that is a full extraction, not a random sample).
 fn sample_rows(first: i64, count: u64, k: u64, seed: u64) -> Vec<i64> {
     use std::collections::HashSet;
 
@@ -717,7 +720,14 @@ fn sample_rows(first: i64, count: u64, k: u64, seed: u64) -> Vec<i64> {
         chosen.insert(v);
     }
     let mut rows: Vec<i64> = chosen.into_iter().map(|r| first + r as i64).collect();
+    // HashSet iteration order is non-deterministic (randomized per process), so
+    // sort to a canonical order first; the seeded shuffle below then makes the
+    // final order both random and reproducible for a given seed.
     rows.sort_unstable();
+    for i in (1..rows.len()).rev() {
+        let j = rng.below(i as u64 + 1) as usize; // uniform in [0, i]
+        rows.swap(i, j);
+    }
     rows
 }
 

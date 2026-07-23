@@ -6,8 +6,9 @@
 - `--sample N`: randomly sample `N` spots from each input instead of extracting
   the whole run. The ncbi-vdb cursor is random-access, so only the sampled rows
   are read (cost is O(N), independent of run size) — fast even on huge runs. The
-  sampled rows are sorted, so output stays in storage order. `--seed` (default
-  42) makes a sample reproducible; change it to draw a different sample.
+  sampled reads are emitted in random order (shuffled, not sorted by row).
+  `--seed` (default 42) makes a sample reproducible; change it to draw a
+  different sample.
 
 ## Version 0.2.1
 

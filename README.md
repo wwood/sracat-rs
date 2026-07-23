@@ -335,7 +335,7 @@ sracat-rs [OPTIONS] <SRA>...
 | `--include-technical` | include technical reads (default: biological only) |
 | `--croak-on-aligned` | refuse aligned (cSRA) runs instead of extracting them (default: extract) |
 | `-t, --threads <N>` | parallel decode threads (default 1); output stays byte-identical. Ignored for aligned (cSRA) runs, which are always single-threaded |
-| `--sample <N>` | randomly sample `N` spots from each input instead of extracting the whole run (reads only those rows — fast even on huge runs); output stays in storage order |
+| `--sample <N>` | randomly sample `N` spots from each input instead of extracting the whole run (reads only those rows — fast even on huge runs); sampled reads are emitted in random order |
 | `--seed <SEED>` | seed for `--sample` (default 42); same seed selects the same rows, so a sample is reproducible |
 | `-h, --help` / `-V, --version` | help / version |
 
@@ -387,12 +387,14 @@ ncbi-vdb cursor is random-access, so `sracat-rs` seeks straight to the chosen
 rows and reads only those — the cost is O(N), independent of the run's size, so
 sampling a few thousand reads out of a multi-gigabyte run is near-instant. Each
 sampled spot yields its reads, so for a single-end run `N` spots means `N`
-reads, and for a paired run each sampled spot contributes both mates. The chosen
-rows are sorted, so the sample is emitted in the same storage order as a full
-extraction. Sampling is reproducible: a given `--seed` (default 42) always
-selects the same rows; change the seed to draw a different sample. If `N` is at
-least the number of spots in the run, the whole run is extracted. Sampling runs
-single-threaded (`-t` is ignored) since the seeks are scattered.
+reads, and for a paired run each sampled spot contributes both mates. The
+sampled reads are emitted in **random order** (shuffled, not sorted by row), so
+the subsample carries none of the run's positional structure. Sampling is
+reproducible: a given `--seed` (default 42) always selects the same rows in the
+same order; change the seed to draw a different sample. If `N` is at least the
+number of spots in the run, the whole run is extracted (in storage order — that
+is a full extraction, not a random sample). Sampling runs single-threaded (`-t`
+is ignored) since the seeks are scattered.
 
 ## Aligned (cSRA) runs
 

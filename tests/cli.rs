@@ -664,6 +664,30 @@ fn sample_is_reproducible_and_bounded() {
         "sampled headers carry the run name"
     );
 
+    // The sample is emitted in random order, not sorted by row. Parse the row id
+    // from each `>ERR015558.<row>` header and check they are not ascending. Only
+    // assert when the sample is large enough that a shuffle landing in sorted
+    // order by chance (probability 1/n!) is negligible.
+    let rows: Vec<u64> = heads
+        .iter()
+        .map(|h| {
+            h.rsplit('.')
+                .next()
+                .and_then(|r| {
+                    r.trim_end_matches(|c: char| !c.is_ascii_digit())
+                        .parse()
+                        .ok()
+                })
+                .expect("row id in header")
+        })
+        .collect();
+    if rows.len() >= 5 {
+        assert!(
+            rows.windows(2).any(|w| w[0] > w[1]),
+            "sampled reads must be in random order, not sorted by row: {rows:?}"
+        );
+    }
+
     // A different seed should pick different rows. Only assert this when the pool
     // is large enough that two independent subsets colliding is negligible (on a
     // tiny fixture it could happen by chance).
