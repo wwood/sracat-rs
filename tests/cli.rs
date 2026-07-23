@@ -606,6 +606,110 @@ fn expect_singles_streams_singles_to_stdout() {
         .unwrap();
 }
 
+/// --sample N draws N spots at random (reading only those rows). For the
+/// single-end fixture, N spots == N reads, so a sample smaller than the run
+/// yields exactly N FASTA records, and the same --seed reproduces byte-identical
+/// output. The sample size is calibrated to the fixture's read count (learned
+/// from a full extraction) so the test holds whatever the fixture's size.
+#[test]
+fn sample_is_reproducible_and_bounded() {
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
+            .args(args)
+            .output()
+            .expect("run --sample");
+        assert!(out.status.success(), "sample run failed: {args:?}");
+        out.stdout
+    };
+    let count_reads = |b: &[u8]| {
+        String::from_utf8_lossy(b)
+            .lines()
+            .filter(|l| l.starts_with('>'))
+            .count()
+    };
+
+    // How many reads does the whole (single-end) run hold? Sample fewer than that
+    // so we exercise the random-subset path, not the "extract everything" path.
+    let total = count_reads(&run(&["--accept-singles", fixture().as_str()]));
+    assert!(total >= 2, "fixture too small to subsample");
+    let n = (total / 2).max(1).to_string();
+
+    let a = run(&[
+        "--accept-singles",
+        "--sample",
+        &n,
+        "--seed",
+        "42",
+        fixture().as_str(),
+    ]);
+    let b = run(&[
+        "--accept-singles",
+        "--sample",
+        &n,
+        "--seed",
+        "42",
+        fixture().as_str(),
+    ]);
+    assert_eq!(a, b, "same seed must reproduce the same sample");
+
+    let text = String::from_utf8(a).expect("utf8 output");
+    let heads: Vec<&str> = text.lines().filter(|l| l.starts_with('>')).collect();
+    assert_eq!(
+        heads.len(),
+        n.parse::<usize>().unwrap(),
+        "single-end: N sampled spots == N reads"
+    );
+    assert!(
+        heads.iter().all(|h| h.contains("ERR015558")),
+        "sampled headers carry the run name"
+    );
+
+    // A different seed should pick different rows. Only assert this when the pool
+    // is large enough that two independent subsets colliding is negligible (on a
+    // tiny fixture it could happen by chance).
+    if total >= 8 {
+        let c = run(&[
+            "--accept-singles",
+            "--sample",
+            &n,
+            "--seed",
+            "7",
+            fixture().as_str(),
+        ]);
+        assert_ne!(
+            text.into_bytes(),
+            c,
+            "a different seed should draw a different sample"
+        );
+    }
+}
+
+/// --sample with N >= the run's spot count extracts the whole run, in storage
+/// order — byte-identical to an unsampled extraction.
+#[test]
+fn sample_larger_than_run_extracts_everything() {
+    let full = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
+        .args(["--accept-singles", fixture().as_str()])
+        .output()
+        .expect("full run");
+    assert!(full.status.success(), "full run failed");
+    let sampled = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
+        .args([
+            "--accept-singles",
+            "--sample",
+            "100000000",
+            fixture().as_str(),
+        ])
+        .output()
+        .expect("oversized sample run");
+    assert!(sampled.status.success(), "oversized sample run failed");
+    assert!(!full.stdout.is_empty(), "fixture should produce reads");
+    assert_eq!(
+        full.stdout, sampled.stdout,
+        "sampling more spots than exist must equal a full extraction"
+    );
+}
+
 /// --accept-singles and --expect-singles are mutually exclusive.
 #[test]
 fn accept_and_expect_singles_conflict() {

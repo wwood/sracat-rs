@@ -111,6 +111,21 @@ struct Cli {
     #[arg(short = 't', long, default_value_t = 1)]
     threads: usize,
 
+    /// Randomly sample N spots from each input instead of extracting the whole
+    /// run. Because the ncbi-vdb cursor is random-access, only the sampled rows
+    /// are read (cost is O(N), not O(run size)), so this is fast even on huge
+    /// runs. Each sampled spot yields its reads: a single-end spot emits one
+    /// read (so N spots == N reads), a paired spot emits both mates. Output is
+    /// in storage order (the sampled rows are sorted), and the sample is
+    /// reproducible for a given --seed.
+    #[arg(long, value_name = "N")]
+    sample: Option<u64>,
+
+    /// Seed for --sample. The same seed selects the same rows, so a sample is
+    /// repeatable across runs; change it to draw a different sample.
+    #[arg(long, default_value_t = 42, value_name = "SEED")]
+    seed: u64,
+
     /// Show a per-input progress bar (spots processed) on stderr.
     #[arg(long)]
     progress: bool,
@@ -385,6 +400,31 @@ fn run() -> Result<()> {
             // multiple cursors it degrades catastrophically — so hard-cap
             // aligned runs to a single thread regardless of -t.
             let run = Run::open(input, opts.qual, opts.allow_aligned)?;
+
+            // --sample: read only n randomly chosen rows directly (the cursor is
+            // random-access), so this never scans the whole run. The seeks are
+            // scattered, so it runs single-threaded regardless of -t.
+            if let Some(n) = cli.sample {
+                let rows = sample_rows(run.first_row(), run.row_count(), n, cli.seed);
+                let pb = cli
+                    .progress
+                    .then(|| make_progress(&name, rows.len() as u64));
+                let c = extract_sample(
+                    &run,
+                    &rows,
+                    &name,
+                    &mut paired,
+                    &mut single,
+                    opts,
+                    pb.as_ref(),
+                )?;
+                if let Some(pb) = pb {
+                    pb.finish();
+                }
+                totals.add(c);
+                continue;
+            }
+
             let eff_threads = if run.is_aligned() { 1 } else { threads };
             if eff_threads < threads {
                 eprintln!(
@@ -479,69 +519,17 @@ fn extract_range(
     let mut since_tick = 0u64;
 
     for row in lo..hi {
-        let spot = run.read_spot(row)?;
-
-        sel.clear();
-        let mut off = 0usize;
-        for (&len32, &ty) in spot.read_len.iter().zip(spot.read_type.iter()) {
-            let len = len32 as usize;
-            if opts.include_technical || (ty & 1) != 0 {
-                sel.push((off, len));
-            }
-            off += len;
-        }
-
-        match sel.len() {
-            0 => counts.skipped += 1,
-            1 => {
-                if !opts.bench_read_only {
-                    let (o, l) = sel[0];
-                    // --accept-singles: interleave the single read into the paired
-                    // stdout stream (in row order) instead of the separate single
-                    // destination, so pairs and singles share one intact stream.
-                    if opts.singles_to_paired {
-                        match paired {
-                            PairedSink::Interleaved(w) => {
-                                write_read(&mut **w, name, row, None, &spot, o, l, &mut qbuf)?
-                            }
-                            PairedSink::Split(..) => unreachable!(
-                                "--accept-singles is incompatible with -1/-2 split output"
-                            ),
-                        }
-                    } else {
-                        write_read(single, name, row, None, &spot, o, l, &mut qbuf)?;
-                    }
-                }
-                counts.singles += 1;
-            }
-            2 => {
-                if opts.croak_on_paired {
-                    bail!(
-                        "{name}: spot {row} is a paired spot, but --expect-singles \
-                         was given (only single/orphan reads are permitted)"
-                    );
-                }
-                if !opts.bench_read_only {
-                    let (o0, l0) = sel[0];
-                    let (o1, l1) = sel[1];
-                    match paired {
-                        PairedSink::Interleaved(w) => {
-                            write_read(&mut **w, name, row, Some(1), &spot, o0, l0, &mut qbuf)?;
-                            write_read(&mut **w, name, row, Some(2), &spot, o1, l1, &mut qbuf)?;
-                        }
-                        PairedSink::Split(w1, w2) => {
-                            write_read(&mut **w1, name, row, Some(1), &spot, o0, l0, &mut qbuf)?;
-                            write_read(&mut **w2, name, row, Some(2), &spot, o1, l1, &mut qbuf)?;
-                        }
-                    }
-                }
-                counts.pairs += 1;
-            }
-            n => bail!(
-                "{name}: spot {row} has {n} biological reads (>2); not supported \
-                 (use --include-technical to inspect, or file an issue)"
-            ),
-        }
+        process_spot(
+            run,
+            row,
+            name,
+            paired,
+            single,
+            opts,
+            &mut counts,
+            &mut sel,
+            &mut qbuf,
+        )?;
         if let Some(pb) = progress {
             since_tick += 1;
             if since_tick >= TICK {
@@ -554,6 +542,183 @@ fn extract_range(
         pb.inc(since_tick);
     }
     Ok(counts)
+}
+
+/// Extract a specific, arbitrary set of rows (as chosen by `--sample`). Unlike
+/// `extract_range` this does not scan a contiguous span: it reads only the given
+/// rows, seeking directly into each via the cursor (the ncbi-vdb cell API is
+/// random-access, so an n-row sample costs O(n), not O(run size)). `rows` is
+/// expected to be sorted ascending so output stays in storage order.
+fn extract_sample(
+    run: &Run,
+    rows: &[i64],
+    name: &str,
+    paired: &mut PairedSink<'_>,
+    single: &mut dyn Write,
+    opts: Opts,
+    progress: Option<&ProgressBar>,
+) -> Result<Counts> {
+    let mut counts = Counts::default();
+    let mut sel: Vec<(usize, usize)> = Vec::new();
+    let mut qbuf: Vec<u8> = Vec::new();
+    for &row in rows {
+        process_spot(
+            run,
+            row,
+            name,
+            paired,
+            single,
+            opts,
+            &mut counts,
+            &mut sel,
+            &mut qbuf,
+        )?;
+        if let Some(pb) = progress {
+            pb.inc(1);
+        }
+    }
+    Ok(counts)
+}
+
+/// Classify one spot (row) into its biological reads and write them: a pair to
+/// `paired` (interleaved or split), a lone read to `single` (or, with
+/// `--accept-singles`, into the paired stream). Shared by the contiguous
+/// (`extract_range`) and sampled (`extract_sample`) paths. `sel` and `qbuf` are
+/// caller-owned scratch buffers reused across rows.
+#[allow(clippy::too_many_arguments)]
+fn process_spot(
+    run: &Run,
+    row: i64,
+    name: &str,
+    paired: &mut PairedSink<'_>,
+    single: &mut dyn Write,
+    opts: Opts,
+    counts: &mut Counts,
+    sel: &mut Vec<(usize, usize)>,
+    qbuf: &mut Vec<u8>,
+) -> Result<()> {
+    let spot = run.read_spot(row)?;
+
+    sel.clear();
+    let mut off = 0usize;
+    for (&len32, &ty) in spot.read_len.iter().zip(spot.read_type.iter()) {
+        let len = len32 as usize;
+        if opts.include_technical || (ty & 1) != 0 {
+            sel.push((off, len));
+        }
+        off += len;
+    }
+
+    match sel.len() {
+        0 => counts.skipped += 1,
+        1 => {
+            if !opts.bench_read_only {
+                let (o, l) = sel[0];
+                // --accept-singles: interleave the single read into the paired
+                // stdout stream (in row order) instead of the separate single
+                // destination, so pairs and singles share one intact stream.
+                if opts.singles_to_paired {
+                    match paired {
+                        PairedSink::Interleaved(w) => {
+                            write_read(&mut **w, name, row, None, &spot, o, l, qbuf)?
+                        }
+                        PairedSink::Split(..) => {
+                            unreachable!("--accept-singles is incompatible with -1/-2 split output")
+                        }
+                    }
+                } else {
+                    write_read(single, name, row, None, &spot, o, l, qbuf)?;
+                }
+            }
+            counts.singles += 1;
+        }
+        2 => {
+            if opts.croak_on_paired {
+                bail!(
+                    "{name}: spot {row} is a paired spot, but --expect-singles \
+                     was given (only single/orphan reads are permitted)"
+                );
+            }
+            if !opts.bench_read_only {
+                let (o0, l0) = sel[0];
+                let (o1, l1) = sel[1];
+                match paired {
+                    PairedSink::Interleaved(w) => {
+                        write_read(&mut **w, name, row, Some(1), &spot, o0, l0, qbuf)?;
+                        write_read(&mut **w, name, row, Some(2), &spot, o1, l1, qbuf)?;
+                    }
+                    PairedSink::Split(w1, w2) => {
+                        write_read(&mut **w1, name, row, Some(1), &spot, o0, l0, qbuf)?;
+                        write_read(&mut **w2, name, row, Some(2), &spot, o1, l1, qbuf)?;
+                    }
+                }
+            }
+            counts.pairs += 1;
+        }
+        n => bail!(
+            "{name}: spot {row} has {n} biological reads (>2); not supported \
+             (use --include-technical to inspect, or file an issue)"
+        ),
+    }
+    Ok(())
+}
+
+/// Deterministic SplitMix64 PRNG. Tiny and dependency-free; good enough for
+/// choosing which rows to sample, and seeded so a given `--seed` reproduces the
+/// same sample.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform integer in `[0, n)` (n > 0), via Lemire's multiply-shift with
+    /// rejection so there is no modulo bias.
+    fn below(&mut self, n: u64) -> u64 {
+        let mut m = (self.next_u64() as u128).wrapping_mul(n as u128);
+        let mut lo = m as u64;
+        if lo < n {
+            let thresh = n.wrapping_neg() % n;
+            while lo < thresh {
+                m = (self.next_u64() as u128).wrapping_mul(n as u128);
+                lo = m as u64;
+            }
+        }
+        (m >> 64) as u64
+    }
+}
+
+/// Choose `k` distinct rows uniformly at random from the run's `[first,
+/// first+count)` id range, returned sorted ascending so the extracted sample
+/// stays in storage order. Uses Floyd's algorithm: O(k) time and memory,
+/// independent of `count`, so it scales to billion-row runs. If `k >= count`
+/// every row is returned (the whole run, in order).
+fn sample_rows(first: i64, count: u64, k: u64, seed: u64) -> Vec<i64> {
+    use std::collections::HashSet;
+
+    if count == 0 || k == 0 {
+        return Vec::new();
+    }
+    if k >= count {
+        return (first..first + count as i64).collect();
+    }
+
+    let mut rng = SplitMix64(seed);
+    let mut chosen: HashSet<u64> = HashSet::with_capacity(k as usize);
+    // Floyd's algorithm for sampling k distinct values from [0, count).
+    for j in (count - k)..count {
+        let t = rng.below(j + 1); // uniform in [0, j]
+        let v = if chosen.contains(&t) { j } else { t };
+        chosen.insert(v);
+    }
+    let mut rows: Vec<i64> = chosen.into_iter().map(|r| first + r as i64).collect();
+    rows.sort_unstable();
+    rows
 }
 
 /// Decode the run in parallel and write in order. Worker threads each own a
