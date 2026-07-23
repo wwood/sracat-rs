@@ -403,26 +403,32 @@ fn run() -> Result<()> {
 
             // --sample: read only n randomly chosen rows directly (the cursor is
             // random-access), so this never scans the whole run. The seeks are
-            // scattered, so it runs single-threaded regardless of -t.
+            // scattered, so it runs single-threaded regardless of -t. When n is at
+            // least the run's spot count the "sample" is the whole run, so fall
+            // through to the ordinary streaming extraction below instead of
+            // materializing every row id (which would allocate O(spot count) and
+            // could OOM on a large run before any read is emitted).
             if let Some(n) = cli.sample {
-                let rows = sample_rows(run.first_row(), run.row_count(), n, cli.seed);
-                let pb = cli
-                    .progress
-                    .then(|| make_progress(&name, rows.len() as u64));
-                let c = extract_sample(
-                    &run,
-                    &rows,
-                    &name,
-                    &mut paired,
-                    &mut single,
-                    opts,
-                    pb.as_ref(),
-                )?;
-                if let Some(pb) = pb {
-                    pb.finish();
+                if n < run.row_count() {
+                    let rows = sample_rows(run.first_row(), run.row_count(), n, cli.seed);
+                    let pb = cli
+                        .progress
+                        .then(|| make_progress(&name, rows.len() as u64));
+                    let c = extract_sample(
+                        &run,
+                        &rows,
+                        &name,
+                        &mut paired,
+                        &mut single,
+                        opts,
+                        pb.as_ref(),
+                    )?;
+                    if let Some(pb) = pb {
+                        pb.finish();
+                    }
+                    totals.add(c);
+                    continue;
                 }
-                totals.add(c);
-                continue;
             }
 
             let eff_threads = if run.is_aligned() { 1 } else { threads };
