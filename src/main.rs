@@ -116,8 +116,10 @@ struct Cli {
     /// are read (cost is O(N), not O(run size)), so this is fast even on huge
     /// runs. Each sampled spot yields its reads: a single-end spot emits one
     /// read (so N spots == N reads), a paired spot emits both mates. The sampled
-    /// reads are emitted in random order (not sorted by row), and the sample is
-    /// reproducible for a given --seed.
+    /// reads are always emitted in random order (not sorted by row), including
+    /// when N covers every read, and the sample is reproducible for a given
+    /// --seed. Holds the chosen row ids in memory (O(min(N, spot count))); to
+    /// extract the whole run in constant memory, don't sample.
     #[arg(long, value_name = "N")]
     sample: Option<u64>,
 
@@ -401,34 +403,32 @@ fn run() -> Result<()> {
             // aligned runs to a single thread regardless of -t.
             let run = Run::open(input, opts.qual, opts.allow_aligned)?;
 
-            // --sample: read only n randomly chosen rows directly (the cursor is
+            // --sample: read only the randomly chosen rows directly (the cursor is
             // random-access), so this never scans the whole run. The seeks are
-            // scattered, so it runs single-threaded regardless of -t. When n is at
-            // least the run's spot count the "sample" is the whole run, so fall
-            // through to the ordinary streaming extraction below instead of
-            // materializing every row id (which would allocate O(spot count) and
-            // could OOM on a large run before any read is emitted).
+            // scattered, so it runs single-threaded regardless of -t. The sample is
+            // always emitted in random order (even when n >= the spot count and so
+            // covers every read); that requires holding the chosen row ids, so
+            // memory is O(min(n, spot count)) -- for a constant-memory full dump,
+            // omit --sample.
             if let Some(n) = cli.sample {
-                if n < run.row_count() {
-                    let rows = sample_rows(run.first_row(), run.row_count(), n, cli.seed);
-                    let pb = cli
-                        .progress
-                        .then(|| make_progress(&name, rows.len() as u64));
-                    let c = extract_sample(
-                        &run,
-                        &rows,
-                        &name,
-                        &mut paired,
-                        &mut single,
-                        opts,
-                        pb.as_ref(),
-                    )?;
-                    if let Some(pb) = pb {
-                        pb.finish();
-                    }
-                    totals.add(c);
-                    continue;
+                let rows = sample_rows(run.first_row(), run.row_count(), n, cli.seed);
+                let pb = cli
+                    .progress
+                    .then(|| make_progress(&name, rows.len() as u64));
+                let c = extract_sample(
+                    &run,
+                    &rows,
+                    &name,
+                    &mut paired,
+                    &mut single,
+                    opts,
+                    pb.as_ref(),
+                )?;
+                if let Some(pb) = pb {
+                    pb.finish();
                 }
+                totals.add(c);
+                continue;
             }
 
             let eff_threads = if run.is_aligned() { 1 } else { threads };
@@ -699,37 +699,43 @@ impl SplitMix64 {
     }
 }
 
-/// Choose `k` distinct rows uniformly at random from the run's `[first,
-/// first+count)` id range, returned in random order (a subsample should not
-/// carry the run's positional structure, so it is emitted shuffled, not row
-/// sorted). Uses Floyd's algorithm to pick the subset in O(k) time and memory
-/// independent of `count` (so it scales to billion-row runs), then a Fisher-Yates
-/// shuffle for the order. Both draw from a seeded PRNG, so a given `seed`
-/// reproduces the same rows in the same order. If `k >= count` the whole run is
-/// returned in storage order (that is a full extraction, not a random sample).
+/// Choose `min(k, count)` distinct rows uniformly at random from the run's
+/// `[first, first+count)` id range, returned in random order so the sample
+/// carries none of the run's positional structure. When `k < count` the subset
+/// is picked with Floyd's algorithm (O(k) time/memory, independent of `count`,
+/// so it scales to billion-row runs); when `k >= count` every row is taken.
+/// Either way the ids are then shuffled with Fisher-Yates. Both steps draw from
+/// a seeded PRNG, so a given `seed` reproduces the same rows in the same order.
+/// Memory is O(min(k, count)) row ids; callers wanting a constant-memory full
+/// extraction should not sample at all.
 fn sample_rows(first: i64, count: u64, k: u64, seed: u64) -> Vec<i64> {
     use std::collections::HashSet;
 
     if count == 0 || k == 0 {
         return Vec::new();
     }
-    if k >= count {
-        return (first..first + count as i64).collect();
-    }
 
     let mut rng = SplitMix64(seed);
-    let mut chosen: HashSet<u64> = HashSet::with_capacity(k as usize);
-    // Floyd's algorithm for sampling k distinct values from [0, count).
-    for j in (count - k)..count {
-        let t = rng.below(j + 1); // uniform in [0, j]
-        let v = if chosen.contains(&t) { j } else { t };
-        chosen.insert(v);
-    }
-    let mut rows: Vec<i64> = chosen.into_iter().map(|r| first + r as i64).collect();
-    // HashSet iteration order is non-deterministic (randomized per process), so
-    // sort to a canonical order first; the seeded shuffle below then makes the
-    // final order both random and reproducible for a given seed.
-    rows.sort_unstable();
+    let mut rows: Vec<i64> = if k >= count {
+        // The whole run: take every id (already in a canonical order).
+        (first..first + count as i64).collect()
+    } else {
+        // Floyd's algorithm for sampling k distinct values from [0, count).
+        let mut chosen: HashSet<u64> = HashSet::with_capacity(k as usize);
+        for j in (count - k)..count {
+            let t = rng.below(j + 1); // uniform in [0, j]
+            let v = if chosen.contains(&t) { j } else { t };
+            chosen.insert(v);
+        }
+        let mut r: Vec<i64> = chosen.into_iter().map(|x| first + x as i64).collect();
+        // HashSet iteration order is non-deterministic (randomized per process),
+        // so sort to a canonical order first; the seeded shuffle below then makes
+        // the final order both random and reproducible for a given seed.
+        r.sort_unstable();
+        r
+    };
+
+    // Fisher-Yates: emit the sample in a uniformly random, seed-reproducible order.
     for i in (1..rows.len()).rev() {
         let j = rng.below(i as u64 + 1) as usize; // uniform in [0, i]
         rows.swap(i, j);

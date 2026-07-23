@@ -708,30 +708,61 @@ fn sample_is_reproducible_and_bounded() {
     }
 }
 
-/// --sample with N >= the run's spot count extracts the whole run, in storage
-/// order — byte-identical to an unsampled extraction.
+/// --sample with N >= the run's spot count covers every read, but still emits
+/// them in random order: same set of records as a full extraction, reordered
+/// (not byte-identical).
 #[test]
-fn sample_larger_than_run_extracts_everything() {
-    let full = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
-        .args(["--accept-singles", fixture().as_str()])
-        .output()
-        .expect("full run");
-    assert!(full.status.success(), "full run failed");
-    let sampled = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
-        .args([
-            "--accept-singles",
-            "--sample",
-            "100000000",
-            fixture().as_str(),
-        ])
-        .output()
-        .expect("oversized sample run");
-    assert!(sampled.status.success(), "oversized sample run failed");
-    assert!(!full.stdout.is_empty(), "fixture should produce reads");
+fn sample_larger_than_run_returns_all_reads_shuffled() {
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_sracat-rs"))
+            .args(args)
+            .output()
+            .expect("run");
+        assert!(out.status.success(), "run failed: {args:?}");
+        String::from_utf8(out.stdout).expect("utf8 output")
+    };
+    // Group each `>` header with its sequence line(s) into one record string.
+    let records = |s: &str| -> Vec<String> {
+        let mut recs: Vec<String> = Vec::new();
+        for line in s.lines() {
+            if line.starts_with('>') || recs.is_empty() {
+                recs.push(line.to_string());
+            } else {
+                let last = recs.last_mut().unwrap();
+                last.push('\n');
+                last.push_str(line);
+            }
+        }
+        recs
+    };
+
+    let full = run(&["--accept-singles", fixture().as_str()]);
+    let sampled = run(&[
+        "--accept-singles",
+        "--sample",
+        "100000000",
+        fixture().as_str(),
+    ]);
+    assert!(!full.is_empty(), "fixture should produce reads");
+
+    // Same multiset of records, regardless of order.
+    let (mut a, mut b) = (records(&full), records(&sampled));
+    assert_eq!(a.len(), b.len(), "oversized sample must return every read");
+    a.sort();
+    b.sort();
     assert_eq!(
-        full.stdout, sampled.stdout,
-        "sampling more spots than exist must equal a full extraction"
+        a, b,
+        "oversized sample must contain exactly the same reads as a full extraction"
     );
+
+    // ...but shuffled, so the order differs from storage order (negligibly likely
+    // to coincide once the run has more than a handful of reads).
+    if a.len() >= 5 {
+        assert_ne!(
+            full, sampled,
+            "an oversized sample must still be randomly ordered, not storage order"
+        );
+    }
 }
 
 /// --accept-singles and --expect-singles are mutually exclusive.
